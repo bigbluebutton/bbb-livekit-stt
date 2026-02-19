@@ -58,24 +58,37 @@ class GladiaSttAgent(EventEmitter):
         participant = self._find_participant(user_id)
 
         if not participant:
-            logging.error(f"Cannot start transcription, participant {user_id} not found.")
+            logging.error(
+                f"Cannot start transcription, participant {user_id} not found."
+            )
             return
 
         track = self._find_audio_track(participant)
 
         if not track:
-            logging.warning(f"Won't start transcription yet, no audio track found for {user_id}.")
+            logging.warning(
+                f"Won't start transcription yet, no audio track found for {user_id}."
+            )
             return
 
         if participant.identity in self.processing_info:
-            logging.debug(f"Transcription task already running for {participant.identity}, ignoring start command.")
+            logging.debug(
+                f"Transcription task already running for {participant.identity}, ignoring start command."
+            )
             return
 
         gladia_locale = self._sanitize_locale(locale)
         stt_stream = self.stt.stream(language=gladia_locale)
-        task = asyncio.create_task(self._run_transcription_pipeline(participant, track, stt_stream))
-        self.processing_info[participant.identity] = {"stream": stt_stream, "task": task}
-        logging.info(f"Started transcription for {participant.identity} with locale {locale}.")
+        task = asyncio.create_task(
+            self._run_transcription_pipeline(participant, track, stt_stream)
+        )
+        self.processing_info[participant.identity] = {
+            "stream": stt_stream,
+            "task": task,
+        }
+        logging.info(
+            f"Started transcription for {participant.identity} with locale {locale}."
+        )
 
     def stop_transcription_for_user(self, user_id: str):
         logging.debug(f"Stopping transcription for {user_id}.")
@@ -87,7 +100,7 @@ class GladiaSttAgent(EventEmitter):
 
     def update_locale_for_user(self, user_id: str, locale: str):
         if user_id in self.participant_settings:
-            self.participant_settings[user_id]['locale'] = locale
+            self.participant_settings[user_id]["locale"] = locale
 
         if user_id in self.processing_info:
             logging.info(f"Updating locale to '{locale}' for user {user_id}.")
@@ -95,33 +108,58 @@ class GladiaSttAgent(EventEmitter):
             gladia_locale = self._sanitize_locale(locale)
             stream.update_options(languages=[gladia_locale])
         else:
-            logging.warning(f"Won't update locale, no active transcription for user {user_id}.")
+            logging.warning(
+                f"Won't update locale, no active transcription for user {user_id}."
+            )
 
-    def update_speech_options_for_user(self, user_id: str, partial_utterances: bool, min_utterance_length: int):
+    def update_speech_options_for_user(
+        self, user_id: str, partial_utterances: bool, min_utterance_length: int
+    ):
         if user_id not in self.participant_settings:
             self.participant_settings[user_id] = {}
         self.participant_settings[user_id]["partial_utterances"] = partial_utterances
-        self.participant_settings[user_id]["min_utterance_length"] = min_utterance_length
+        self.participant_settings[user_id]["min_utterance_length"] = (
+            min_utterance_length
+        )
 
-    def _on_track_subscribed(self, track: rtc.Track, publication: rtc.TrackPublication, participant: rtc.RemoteParticipant):
+    def _on_track_subscribed(
+        self,
+        track: rtc.Track,
+        publication: rtc.TrackPublication,
+        participant: rtc.RemoteParticipant,
+    ):
         if publication.source != rtc.TrackSource.SOURCE_MICROPHONE:
-            logging.debug(f"Skipping transcription for {participant.identity}'s track {track.sid} because it's not a microphone.")
+            logging.debug(
+                f"Skipping transcription for {participant.identity}'s track {track.sid} because it's not a microphone."
+            )
             return
 
         settings = self.participant_settings.get(participant.identity)
 
         if settings:
-            logging.debug(f"Participant {participant.identity} subscribed with active settings, starting transcription.")
-            self.start_transcription_for_user(participant.identity, settings['locale'], settings['provider'])
+            logging.debug(
+                f"Participant {participant.identity} subscribed with active settings, starting transcription."
+            )
+            self.start_transcription_for_user(
+                participant.identity, settings["locale"], settings["provider"]
+            )
         else:
-            logging.debug(f"Participant {participant.identity} subscribed with no active settings, skipping transcription.")
+            logging.debug(
+                f"Participant {participant.identity} subscribed with no active settings, skipping transcription."
+            )
 
-
-    def _on_track_unsubscribed(self, track: rtc.Track, publication: rtc.TrackPublication, participant: rtc.RemoteParticipant):
+    def _on_track_unsubscribed(
+        self,
+        track: rtc.Track,
+        publication: rtc.TrackPublication,
+        participant: rtc.RemoteParticipant,
+    ):
         self.stop_transcription_for_user(participant.identity)
 
     def _on_participant_disconnected(self, participant: rtc.RemoteParticipant, *_):
-        logging.debug(f"Participant {participant.identity} disconnected, stopping transcription.")
+        logging.debug(
+            f"Participant {participant.identity} disconnected, stopping transcription."
+        )
         self.stop_transcription_for_user(participant.identity)
         self.participant_settings.pop(participant.identity, None)
 
@@ -144,11 +182,16 @@ class GladiaSttAgent(EventEmitter):
         # Gladia only accepts ISO 639-1 locales (e.g. "en")
         # BBB uses <ISO 639-1>-<ISO 3166-1> format (e.g. "en-US")
         # Sanitization here is to ensure we use Gladia's format.
-        gladia_locale = locale.split('-')[0].lower()
+        gladia_locale = locale.split("-")[0].lower()
 
         return gladia_locale
 
-    async def _run_transcription_pipeline(self, participant: rtc.RemoteParticipant, track: rtc.Track, stt_stream: stt.SpeechStream):
+    async def _run_transcription_pipeline(
+        self,
+        participant: rtc.RemoteParticipant,
+        track: rtc.Track,
+        stt_stream: stt.SpeechStream,
+    ):
         audio_stream = rtc.AudioStream(track)
 
         async def forward_audio_task():
@@ -163,7 +206,9 @@ class GladiaSttAgent(EventEmitter):
                 if event.type == stt.SpeechEventType.FINAL_TRANSCRIPT:
                     self.emit("final_transcript", participant=participant, event=event)
                 elif event.type == stt.SpeechEventType.INTERIM_TRANSCRIPT:
-                    self.emit("interim_transcript", participant=participant, event=event)
+                    self.emit(
+                        "interim_transcript", participant=participant, event=event
+                    )
 
         try:
             await asyncio.gather(forward_audio_task(), process_stt_task())

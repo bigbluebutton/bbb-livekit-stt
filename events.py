@@ -1,6 +1,7 @@
 from collections import defaultdict
 import asyncio
 
+
 class EventEmitter:
     def __init__(self):
         self._events = defaultdict(list)
