@@ -3,9 +3,9 @@ import json
 import logging
 import time
 import redis.asyncio as redis
+from livekit.agents import stt
 from config import RedisConfig
 from livekit.agents.stt import SpeechData
-
 
 class RedisManager:
     UPDATE_TRANSCRIPT_PUB_MSG = "UpdateTranscriptPubMsg"
@@ -24,12 +24,8 @@ class RedisManager:
     async def connect(self):
         try:
             logging.debug(f"Connecting to Redis at {self.host}:{self.port}")
-            self.pub_client = redis.Redis(
-                host=self.host, port=self.port, password=self.password
-            )
-            self.sub_client = redis.Redis(
-                host=self.host, port=self.port, password=self.password
-            )
+            self.pub_client = redis.Redis(host=self.host, port=self.port, password=self.password)
+            self.sub_client = redis.Redis(host=self.host, port=self.port, password=self.password)
             await self.pub_client.ping()
             await self.sub_client.ping()
             logging.info("Connected to Redis")
@@ -61,9 +57,7 @@ class RedisManager:
         )
 
         try:
-            await self.pub_client.publish(
-                self.TO_AKKA_APPS_CHANNEL, json.dumps(message)
-            )
+            await self.pub_client.publish(self.TO_AKKA_APPS_CHANNEL, json.dumps(message))
             logging.debug(f"Published to Redis: {message}")
         except Exception as e:
             logging.error(f"Failed to publish to Redis: {e}")
@@ -79,12 +73,10 @@ class RedisManager:
 
             while True:
                 try:
-                    message = await pubsub.get_message(
-                        ignore_subscribe_messages=True, timeout=1.0
-                    )
+                    message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
 
-                    if message and message["type"] == "message":
-                        await callback(message["data"].decode("utf-8"))
+                    if message and message['type'] == 'message':
+                        await callback(message['data'].decode('utf-8'))
                 except asyncio.CancelledError:
                     logging.info("Redis command listener cancelled.")
                     break
@@ -130,10 +122,10 @@ class RedisManager:
                     "transcriptId": f"{user_id}-{locale}-{start}",
                     "start": str(start),
                     "end": str(end),
-                    "text": "",
+                    "text": '',
                     "transcript": transcript,
                     "locale": locale,
                     "result": result,
                 },
-            },
+            }
         }
