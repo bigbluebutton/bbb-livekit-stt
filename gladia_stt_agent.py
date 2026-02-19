@@ -16,6 +16,7 @@ from events import EventEmitter
 class GladiaSttAgent(EventEmitter):
     def __init__(self, config: GladiaConfig):
         super().__init__()
+        self.config = config
         self.stt = GladiaSTT(**config.to_dict())
         self.ctx: JobContext | None = None
         self.room: rtc.Room | None = None
@@ -47,7 +48,9 @@ class GladiaSttAgent(EventEmitter):
         await asyncio.sleep(0.1)
 
     def start_transcription_for_user(self, user_id: str, locale: str, provider: str):
-        self.participant_settings[user_id] = {"locale": locale, "provider": provider}
+        settings = self.participant_settings.setdefault(user_id, {})
+        settings["locale"] = locale
+        settings["provider"] = provider
 
         participant = self._find_participant(user_id)
 
@@ -151,6 +154,8 @@ class GladiaSttAgent(EventEmitter):
             async for event in stt_stream:
                 if event.type == stt.SpeechEventType.FINAL_TRANSCRIPT:
                     self.emit("final_transcript", participant=participant, event=event)
+                elif event.type == stt.SpeechEventType.INTERIM_TRANSCRIPT and self.config.interim_results:
+                    self.emit("interim_transcript", participant=participant, event=event)
 
         try:
             await asyncio.gather(forward_audio_task(), process_stt_task())

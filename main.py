@@ -25,7 +25,11 @@ async def entrypoint(ctx: JobContext):
             envelope = msg.get("envelope", {})
             core = msg.get("core", {})
 
-            if envelope.get("name") != RedisManager.USER_SPEECH_LOCALE_CHANGED_EVT_MSG:
+            event_name = envelope.get("name")
+            if event_name not in (
+                RedisManager.USER_SPEECH_LOCALE_CHANGED_EVT_MSG,
+                RedisManager.USER_SPEECH_OPTIONS_CHANGED_EVT_MSG,
+            ):
                 return
 
             routing = envelope.get("routing", {})
@@ -36,17 +40,26 @@ async def entrypoint(ctx: JobContext):
             if meeting_id != agent.room.name:
                 return
 
-            locale = body.get("locale")
-            provider = body.get("provider")
+            if event_name == RedisManager.USER_SPEECH_LOCALE_CHANGED_EVT_MSG:
+                locale = body.get("locale")
+                provider = body.get("provider")
 
-            if not (provider and locale):
-                agent.stop_transcription_for_user(user_id)
-            else:
-                current_locale = agent.participant_settings.get(user_id, {}).get('locale')
-                if current_locale and current_locale != locale:
-                    agent.update_locale_for_user(user_id, locale)
-                elif not current_locale:
-                    agent.start_transcription_for_user(user_id, locale, provider)
+                if not (provider and locale):
+                    agent.stop_transcription_for_user(user_id)
+                else:
+                    current_locale = agent.participant_settings.get(user_id, {}).get('locale')
+                    if current_locale and current_locale != locale:
+                        agent.update_locale_for_user(user_id, locale)
+                    elif not current_locale:
+                        agent.start_transcription_for_user(user_id, locale, provider)
+
+            elif event_name == RedisManager.USER_SPEECH_OPTIONS_CHANGED_EVT_MSG:
+                partial_utterances = body.get("partialUtterances", False)
+                min_utterance_length = body.get("minUtteranceLength", 0)
+                settings = agent.participant_settings.setdefault(user_id, {})
+                settings["partial_utterances"] = partial_utterances
+                settings["min_utterance_length"] = min_utterance_length
+                logging.info(f"User speech options changed for {user_id}: {settings}")
 
         except json.JSONDecodeError:
             logging.warning(f"Could not decode Redis message: {message_data}")
@@ -85,6 +98,48 @@ async def entrypoint(ctx: JobContext):
 
             await redis_manager.publish_update_transcript_pub_msg(
                 agent.room.name, participant.identity, alternative, bbb_locale
+            )
+
+    @agent.on("interim_transcript")
+    async def on_interim_transcript(participant: rtc.RemoteParticipant, event: stt.SpeechEvent):
+        p_settings = agent.participant_settings.get(participant.identity, {})
+
+        if not p_settings.get("partial_utterances", False):
+            return
+
+        original_locale = p_settings.get("locale")
+
+        if not original_locale:
+            logging.warning(f"Could not find original locale for participant {participant.identity}, cannot process interim transcripts.")
+            return
+
+        original_lang = original_locale.split('-')[0]
+        min_utterance_length = p_settings.get("min_utterance_length", 0)
+
+        for alternative in event.alternatives:
+            transcript_lang = alternative.language
+            text = alternative.text
+
+            if min_utterance_length and len(text.split()) < min_utterance_length:
+                logging.debug(f"Discarding interim transcript for {participant.identity}: too short ({len(text.split())} < {min_utterance_length} words).")
+                continue
+
+            bbb_locale = None
+
+            logging.debug(f"Interim transcript for {participant.identity} ({transcript_lang}): {text}")
+
+            if transcript_lang == original_lang:
+                bbb_locale = original_locale
+            else:
+                bbb_locale = gladia_config.translation_lang_map.get(transcript_lang)
+
+            if not bbb_locale:
+                logging.warning(f"Could not find a BBB locale mapping for language '{transcript_lang}'. "
+                                f"Falling back to the language code itself. ")
+                bbb_locale = transcript_lang
+
+            await redis_manager.publish_update_transcript_pub_msg(
+                agent.room.name, participant.identity, alternative, bbb_locale, result=False
             )
 
     redis_listen_task = asyncio.create_task(redis_manager.listen(on_redis_message))

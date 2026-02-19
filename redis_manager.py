@@ -10,6 +10,7 @@ from livekit.agents.stt import SpeechData
 class RedisManager:
     UPDATE_TRANSCRIPT_PUB_MSG = "UpdateTranscriptPubMsg"
     USER_SPEECH_LOCALE_CHANGED_EVT_MSG = "UserSpeechLocaleChangedEvtMsg"
+    USER_SPEECH_OPTIONS_CHANGED_EVT_MSG = "UserSpeechOptionsChangedEvtMsg"
     TO_AKKA_APPS_CHANNEL = "to-akka-apps-redis-channel"
     FROM_AKKA_APPS_CHANNEL = "from-akka-apps-redis-channel"
 
@@ -39,6 +40,7 @@ class RedisManager:
         user_id: str,
         transcript_data: SpeechData,
         locale: str,
+        result: bool = True,
     ):
         if not self.pub_client:
             logging.warning("Redis not connected, skipping transcription publish")
@@ -49,7 +51,7 @@ class RedisManager:
             user_id,
             locale,
             transcript_data.text,
-            True,
+            result,
             int(transcript_data.start_time * 1000),
             int(transcript_data.end_time * 1000),
         )
