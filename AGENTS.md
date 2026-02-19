@@ -58,6 +58,19 @@ You can make use of the LiveKit CLI (`lk`) for various tasks, with user approval
 
 In particular, you can use it to manage SIP trunks for telephony-based agents. Refer to `lk sip --help` for more information.
 
+## CHANGELOG
+
+Always update the CHANGELOG.md file when commiting with any of the following types of changes:
+  - feat
+  - fix
+  - build
+  - breaking changes
+  - docs
+
+Changelog entries MUST be the commit message title and should be added in chronological
+order under the UNRELEASED section. Changes should be aggregated by commit type;
+see above list of prefixes and follow that order.
+
 ## Commit message guidelines
 
 - Commit message titles should be structured with convetional-commits: https://www.conventionalcommits.org/en/v1.0.0/
