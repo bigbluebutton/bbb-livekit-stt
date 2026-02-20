@@ -9,8 +9,15 @@ on:
       - "v*.*.*"
 
 jobs:
+  lint:
+    uses: ./.github/workflows/docker-lint.yml
+    permissions:
+      contents: read
+
   build:
     name: Build Docker image for ${{ matrix.platform }}
+    needs:
+      - lint
     runs-on: ${{ matrix.os }}
     permissions:
       packages: write
