@@ -23,7 +23,7 @@ ecosystem.
 1.  **Clone the repository:**
 
     ```bash
-    git clone git@github.com:mconf/bbb-livekit-stt.git
+    git clone git@github.com:bigbluebutton/bbb-livekit-stt.git
     cd bbb-livekit-stt
     ```
 
