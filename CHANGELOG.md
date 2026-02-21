@@ -7,6 +7,10 @@ Final releases will consolidate all intermediate changes in chronological order.
 
 ## UNRELEASED
 
+* feat(tests): add unit and integration tests with pytest
+* feat(tests): add coverage reporting with pytest-cov
+* feat(tests): add tests for v0.2.0 changes (utils coercions, config redaction, on_track_subscribed fix, new defaults)
+* build: add GitHub Actions workflow for running tests
 ## v0.2.0
 
 * feat(stt): support INTERIM transcriptions

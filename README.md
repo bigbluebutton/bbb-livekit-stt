@@ -100,6 +100,26 @@ Pre-built images are available via GitHub Container Registry as well.
 
 ### Development
 
+#### Testing
+
+Run the unit tests:
+
+```bash
+uv run pytest tests/ --ignore=tests/integration
+```
+
+Run with coverage:
+
+```bash
+uv run pytest tests/ --ignore=tests/integration --cov --cov-report=term-missing
+```
+
+Integration tests require a real Gladia API key and make live requests to the Gladia service. Set `GLADIA_API_KEY` and run:
+
+```bash
+GLADIA_API_KEY=your-key uv run pytest tests/integration -m integration
+```
+
 #### Linting
 
 This project uses [ruff](https://docs.astral.sh/ruff/) for linting and formatting. To check for issues:
