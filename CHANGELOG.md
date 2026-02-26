@@ -8,6 +8,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 ## UNRELEASED
 
 * feat(stt): support INTERIM transcriptions
+* feat: add env var mappings for remaining Gladia options
 * build: livekit-agents[gladia]~=1.4
 * build: add docker image build and publish workflow
 
