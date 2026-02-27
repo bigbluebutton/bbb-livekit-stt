@@ -9,9 +9,14 @@ from livekit import rtc
 
 from redis_manager import RedisManager
 from gladia_stt_agent import GladiaSttAgent
-from config import gladia_config, redis_config
+from config import get_redacted_app_config, gladia_config, redis_config
+from utils import coerce_min_utterance_length_seconds, coerce_partial_utterances
 
 load_dotenv()
+
+
+def _log_startup_configuration():
+    logging.debug("Application configuration: %s", json.dumps(get_redacted_app_config(), sort_keys=True))
 
 
 def _is_below_min_confidence(alternative: stt.SpeechData, min_confidence: float) -> bool:
@@ -20,6 +25,7 @@ def _is_below_min_confidence(alternative: stt.SpeechData, min_confidence: float)
 
 async def entrypoint(ctx: JobContext):
     nest_asyncio.apply()
+    _log_startup_configuration()
 
     redis_manager = RedisManager(redis_config)
     agent = GladiaSttAgent(gladia_config)
@@ -59,8 +65,8 @@ async def entrypoint(ctx: JobContext):
                         agent.start_transcription_for_user(user_id, locale, provider)
 
             elif event_name == RedisManager.USER_SPEECH_OPTIONS_CHANGED_EVT_MSG:
-                partial_utterances = body.get("partialUtterances", False)
-                min_utterance_length = body.get("minUtteranceLength", 0)
+                partial_utterances = coerce_partial_utterances(body.get("partialUtterances", False))
+                min_utterance_length = coerce_min_utterance_length_seconds(body.get("minUtteranceLength", 0))
                 settings = agent.participant_settings.setdefault(user_id, {})
                 settings["partial_utterances"] = partial_utterances
                 settings["min_utterance_length"] = min_utterance_length
@@ -93,8 +99,14 @@ async def entrypoint(ctx: JobContext):
             transcript_lang = alternative.language
             text = alternative.text
             bbb_locale = None
+            utterance_duration_seconds = max(0.0, alternative.end_time - alternative.start_time)
 
-            logging.info(f"Transcript for {participant.identity} ({transcript_lang}): {text}")
+            logging.info(f"Transcript for {participant.identity} = [{transcript_lang}] {text}",
+                         extra={
+                             "utterance_duration_seconds": utterance_duration_seconds,
+                             "confidence": alternative.confidence,
+                             "original_lang": original_lang,
+                         })
 
             if transcript_lang == original_lang:
                 # This is the original transcript, use the original BBB locale
@@ -138,14 +150,23 @@ async def entrypoint(ctx: JobContext):
 
             transcript_lang = alternative.language
             text = alternative.text
+            utterance_duration_seconds = max(0.0, alternative.end_time - alternative.start_time)
 
-            if min_utterance_length and len(text.split()) < min_utterance_length:
-                logging.debug(f"Discarding interim transcript for {participant.identity}: too short ({len(text.split())} < {min_utterance_length} words).")
+            if min_utterance_length and utterance_duration_seconds <= min_utterance_length:
+                logging.debug(
+                    f"Discarding interim transcript for {participant.identity}: too short "
+                    f"({utterance_duration_seconds:.3f}s <= {min_utterance_length}s)."
+                )
                 continue
 
             bbb_locale = None
 
-            logging.debug(f"Interim transcript for {participant.identity} ({transcript_lang}): {text}")
+            logging.debug(f"Interim transcript for {participant.identity} = [{transcript_lang}] {text}",
+                          extra={
+                              "utterance_duration_seconds": utterance_duration_seconds,
+                              "confidence": alternative.confidence,
+                              "original_lang": original_lang,
+                          })
 
             if transcript_lang == original_lang:
                 bbb_locale = original_locale
