@@ -7,6 +7,8 @@ Final releases will consolidate all intermediate changes in chronological order.
 
 ## UNRELEASED
 
+## v0.2.0
+
 * feat(stt): support INTERIM transcriptions
 * feat: add filtering based on Gladia confidence score
 * feat: add env var mappings for remaining Gladia options
