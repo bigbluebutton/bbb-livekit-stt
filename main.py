@@ -16,10 +16,15 @@ load_dotenv()
 
 
 def _log_startup_configuration():
-    logging.debug("Application configuration: %s", json.dumps(get_redacted_app_config(), sort_keys=True))
+    logging.debug(
+        "Application configuration: %s",
+        json.dumps(get_redacted_app_config(), sort_keys=True),
+    )
 
 
-def _is_below_min_confidence(alternative: stt.SpeechData, min_confidence: float) -> bool:
+def _is_below_min_confidence(
+    alternative: stt.SpeechData, min_confidence: float
+) -> bool:
     return alternative.confidence < min_confidence
 
 
@@ -58,15 +63,21 @@ async def entrypoint(ctx: JobContext):
                 if not (provider and locale):
                     agent.stop_transcription_for_user(user_id)
                 else:
-                    current_locale = agent.participant_settings.get(user_id, {}).get('locale')
+                    current_locale = agent.participant_settings.get(user_id, {}).get(
+                        "locale"
+                    )
                     if current_locale and current_locale != locale:
                         agent.update_locale_for_user(user_id, locale)
                     elif not current_locale:
                         agent.start_transcription_for_user(user_id, locale, provider)
 
             elif event_name == RedisManager.USER_SPEECH_OPTIONS_CHANGED_EVT_MSG:
-                partial_utterances = coerce_partial_utterances(body.get("partialUtterances", False))
-                min_utterance_length = coerce_min_utterance_length_seconds(body.get("minUtteranceLength", 0))
+                partial_utterances = coerce_partial_utterances(
+                    body.get("partialUtterances", False)
+                )
+                min_utterance_length = coerce_min_utterance_length_seconds(
+                    body.get("minUtteranceLength", 0)
+                )
                 settings = agent.participant_settings.setdefault(user_id, {})
                 settings["partial_utterances"] = partial_utterances
                 settings["min_utterance_length"] = min_utterance_length
@@ -78,18 +89,24 @@ async def entrypoint(ctx: JobContext):
             logging.error(f"Error processing Redis message: {e}")
 
     @agent.on("final_transcript")
-    async def on_final_transcript(participant: rtc.RemoteParticipant, event: stt.SpeechEvent):
+    async def on_final_transcript(
+        participant: rtc.RemoteParticipant, event: stt.SpeechEvent
+    ):
         p_settings = agent.participant_settings.get(participant.identity, {})
         original_locale = p_settings.get("locale")
 
         if not original_locale:
-            logging.warning(f"Could not find original locale for participant {participant.identity}, cannot process transcripts.")
+            logging.warning(
+                f"Could not find original locale for participant {participant.identity}, cannot process transcripts."
+            )
             return
 
-        original_lang = original_locale.split('-')[0]
+        original_lang = original_locale.split("-")[0]
 
         for alternative in event.alternatives:
-            if _is_below_min_confidence(alternative, gladia_config.min_confidence_final):
+            if _is_below_min_confidence(
+                alternative, gladia_config.min_confidence_final
+            ):
                 logging.debug(
                     f"Discarding final transcript for {participant.identity}: "
                     f"low confidence ({alternative.confidence} < {gladia_config.min_confidence_final})."
@@ -99,14 +116,18 @@ async def entrypoint(ctx: JobContext):
             transcript_lang = alternative.language
             text = alternative.text
             bbb_locale = None
-            utterance_duration_seconds = max(0.0, alternative.end_time - alternative.start_time)
+            utterance_duration_seconds = max(
+                0.0, alternative.end_time - alternative.start_time
+            )
 
-            logging.info(f"Transcript for {participant.identity} = [{transcript_lang}] {text}",
-                         extra={
-                             "utterance_duration_seconds": utterance_duration_seconds,
-                             "confidence": alternative.confidence,
-                             "original_lang": original_lang,
-                         })
+            logging.info(
+                f"Transcript for {participant.identity} = [{transcript_lang}] {text}",
+                extra={
+                    "utterance_duration_seconds": utterance_duration_seconds,
+                    "confidence": alternative.confidence,
+                    "original_lang": original_lang,
+                },
+            )
 
             if transcript_lang == original_lang:
                 # This is the original transcript, use the original BBB locale
@@ -116,8 +137,10 @@ async def entrypoint(ctx: JobContext):
                 bbb_locale = gladia_config.translation_lang_map.get(transcript_lang)
 
             if not bbb_locale:
-                logging.warning(f"Could not find a BBB locale mapping for language '{transcript_lang}'. "
-                                f"Falling back to the language code itself. ")
+                logging.warning(
+                    f"Could not find a BBB locale mapping for language '{transcript_lang}'. "
+                    f"Falling back to the language code itself. "
+                )
                 bbb_locale = transcript_lang
 
             await redis_manager.publish_update_transcript_pub_msg(
@@ -125,7 +148,9 @@ async def entrypoint(ctx: JobContext):
             )
 
     @agent.on("interim_transcript")
-    async def on_interim_transcript(participant: rtc.RemoteParticipant, event: stt.SpeechEvent):
+    async def on_interim_transcript(
+        participant: rtc.RemoteParticipant, event: stt.SpeechEvent
+    ):
         p_settings = agent.participant_settings.get(participant.identity, {})
 
         if not p_settings.get("partial_utterances", False):
@@ -134,14 +159,18 @@ async def entrypoint(ctx: JobContext):
         original_locale = p_settings.get("locale")
 
         if not original_locale:
-            logging.warning(f"Could not find original locale for participant {participant.identity}, cannot process interim transcripts.")
+            logging.warning(
+                f"Could not find original locale for participant {participant.identity}, cannot process interim transcripts."
+            )
             return
 
-        original_lang = original_locale.split('-')[0]
+        original_lang = original_locale.split("-")[0]
         min_utterance_length = p_settings.get("min_utterance_length", 0)
 
         for alternative in event.alternatives:
-            if _is_below_min_confidence(alternative, gladia_config.min_confidence_interim):
+            if _is_below_min_confidence(
+                alternative, gladia_config.min_confidence_interim
+            ):
                 logging.debug(
                     f"Discarding interim transcript for {participant.identity}: "
                     f"low confidence ({alternative.confidence} < {gladia_config.min_confidence_interim})."
@@ -150,9 +179,14 @@ async def entrypoint(ctx: JobContext):
 
             transcript_lang = alternative.language
             text = alternative.text
-            utterance_duration_seconds = max(0.0, alternative.end_time - alternative.start_time)
+            utterance_duration_seconds = max(
+                0.0, alternative.end_time - alternative.start_time
+            )
 
-            if min_utterance_length and utterance_duration_seconds <= min_utterance_length:
+            if (
+                min_utterance_length
+                and utterance_duration_seconds <= min_utterance_length
+            ):
                 logging.debug(
                     f"Discarding interim transcript for {participant.identity}: too short "
                     f"({utterance_duration_seconds:.3f}s <= {min_utterance_length}s)."
@@ -161,12 +195,14 @@ async def entrypoint(ctx: JobContext):
 
             bbb_locale = None
 
-            logging.debug(f"Interim transcript for {participant.identity} = [{transcript_lang}] {text}",
-                          extra={
-                              "utterance_duration_seconds": utterance_duration_seconds,
-                              "confidence": alternative.confidence,
-                              "original_lang": original_lang,
-                          })
+            logging.debug(
+                f"Interim transcript for {participant.identity} = [{transcript_lang}] {text}",
+                extra={
+                    "utterance_duration_seconds": utterance_duration_seconds,
+                    "confidence": alternative.confidence,
+                    "original_lang": original_lang,
+                },
+            )
 
             if transcript_lang == original_lang:
                 bbb_locale = original_locale
@@ -174,12 +210,18 @@ async def entrypoint(ctx: JobContext):
                 bbb_locale = gladia_config.translation_lang_map.get(transcript_lang)
 
             if not bbb_locale:
-                logging.warning(f"Could not find a BBB locale mapping for language '{transcript_lang}'. "
-                                f"Falling back to the language code itself. ")
+                logging.warning(
+                    f"Could not find a BBB locale mapping for language '{transcript_lang}'. "
+                    f"Falling back to the language code itself. "
+                )
                 bbb_locale = transcript_lang
 
             await redis_manager.publish_update_transcript_pub_msg(
-                agent.room.name, participant.identity, alternative, bbb_locale, result=False
+                agent.room.name,
+                participant.identity,
+                alternative,
+                bbb_locale,
+                result=False,
             )
 
     redis_listen_task = asyncio.create_task(redis_manager.listen(on_redis_message))

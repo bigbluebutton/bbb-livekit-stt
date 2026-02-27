@@ -82,7 +82,7 @@ For production, use the `start` command.
 uv run python3 main.py start
 ```
 
-#### Docker (locally)
+#### Docker
 
 Build the image:
 
@@ -94,3 +94,28 @@ Run:
 
 ```bash
 docker run --network host --rm -it --env-file .env bbb-livekit-stt
+```
+
+Pre-built images are available via GitHub Container Registry as well.
+
+### Development
+
+#### Linting
+
+This project uses [ruff](https://docs.astral.sh/ruff/) for linting and formatting. To check for issues:
+
+```bash
+uv run ruff check .
+```
+
+To automatically fix fixable issues:
+
+```bash
+uv run ruff check --fix .
+```
+
+To format the code:
+
+```bash
+uv run ruff format .
+```

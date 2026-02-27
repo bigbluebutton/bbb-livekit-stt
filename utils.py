@@ -25,11 +25,15 @@ def coerce_min_utterance_length_seconds(value: object, default: float = 0.0) -> 
     try:
         parsed = float(value)
     except (TypeError, ValueError):
-        logging.warning(f"Invalid minUtteranceLength value '{value}', falling back to {default}.")
+        logging.warning(
+            f"Invalid minUtteranceLength value '{value}', falling back to {default}."
+        )
         return default
 
     if parsed < 0:
-        logging.warning(f"Negative minUtteranceLength value '{value}', clamping to {default}.")
+        logging.warning(
+            f"Negative minUtteranceLength value '{value}', clamping to {default}."
+        )
         return default
 
     return parsed

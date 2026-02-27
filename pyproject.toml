@@ -10,3 +10,8 @@ dependencies = [
     "redis~=6.4.0",
     "nest-asyncio~=1.6.0",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.4",
+]
