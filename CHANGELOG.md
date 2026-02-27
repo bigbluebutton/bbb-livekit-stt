@@ -10,6 +10,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 * feat(stt): support INTERIM transcriptions
 * feat: add filtering based on Gladia confidence score
 * feat: add env var mappings for remaining Gladia options
+* refactor: adjust fallback/default Gladia values
 * build: livekit-agents[gladia]~=1.4
 * build: add docker image build and publish workflow
 

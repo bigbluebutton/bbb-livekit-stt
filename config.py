@@ -1,9 +1,10 @@
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Literal
 
 DEFAULT_TRANSLATION_LANG_MAP = "de:de-DE,en:en-US,es:es-ES,fr:fr-FR,hi:hi-IN,it:it-IT,ja:ja-JP,pt:pt-BR,ru:ru-RU,zh:zh-CN"
+REDACTED_CONFIG_KEYS = {"api_key", "password", "secret", "token"}
 
 def _get_float_env(key: str, default: float) -> float:
     val = os.getenv(key)
@@ -77,17 +78,17 @@ class GladiaConfig:
     api_key: str | None = field(default_factory=lambda: os.getenv('GLADIA_API_KEY'))
     min_confidence_interim: float = field(default_factory=lambda: _get_float_env(
         'GLADIA_MIN_CONFIDENCE_INTERIM',
-        _get_float_env('GLADIA_MIN_CONFIDENCE', 0.0),
+        _get_float_env('GLADIA_MIN_CONFIDENCE', 0.1),
     ))
     min_confidence_final: float = field(default_factory=lambda: _get_float_env(
         'GLADIA_MIN_CONFIDENCE_FINAL',
-        _get_float_env('GLADIA_MIN_CONFIDENCE', 0.0),
+        _get_float_env('GLADIA_MIN_CONFIDENCE', 0.1),
     ))
     model: str | None = field(default_factory=lambda: os.getenv('GLADIA_MODEL', None))
     base_url: str | None = field(default_factory=lambda: os.getenv('GLADIA_BASE_URL', None))
     interim_results: bool | None = field(default_factory=lambda: _get_bool_env('GLADIA_INTERIM_RESULTS', None))
     languages: List[str] | None = field(default_factory=lambda: _get_list_env('GLADIA_LANGUAGES', None))
-    code_switching: bool | None = field(default_factory=lambda: _get_bool_env('GLADIA_CODE_SWITCHING', None))
+    code_switching: bool | None = field(default_factory=lambda: _get_bool_env('GLADIA_CODE_SWITCHING', False))
     sample_rate: int = field(default_factory=lambda: int(os.getenv('GLADIA_SAMPLE_RATE', 16000)))
     bit_depth: int = field(default_factory=lambda: int(os.getenv('GLADIA_BIT_DEPTH', 16)))
     channels: int = field(default_factory=lambda: int(os.getenv('GLADIA_CHANNELS', 1)))
@@ -111,8 +112,8 @@ class GladiaConfig:
     custom_vocabulary: List[Any] | None = field(default_factory=lambda: _get_json_env('GLADIA_CUSTOM_VOCABULARY'))
     custom_spelling: Dict[str, List[str]] | None = field(default_factory=lambda: _get_json_env('GLADIA_CUSTOM_SPELLING'))
 
-    pre_processing_audio_enhancer: bool = field(default_factory=lambda: _get_bool_env('GLADIA_PRE_PROCESSING_AUDIO_ENHANCER', False))
-    pre_processing_speech_threshold: float | None = field(default_factory=lambda: _get_float_env('GLADIA_PRE_PROCESSING_SPEECH_THRESHOLD', None))
+    pre_processing_audio_enhancer: bool = field(default_factory=lambda: _get_bool_env('GLADIA_PRE_PROCESSING_AUDIO_ENHANCER', True))
+    pre_processing_speech_threshold: float | None = field(default_factory=lambda: _get_float_env('GLADIA_PRE_PROCESSING_SPEECH_THRESHOLD', 0.7))
 
     def to_dict(self):
         # Exclude None values so defaults are used by the plugin
@@ -147,3 +148,24 @@ class GladiaConfig:
         return {k: v for k, v in data.items() if v is not None}
 
 gladia_config = GladiaConfig()
+
+
+def redact_config_values(value: object, key: str | None = None) -> object:
+    if key and key.lower() in REDACTED_CONFIG_KEYS:
+        return "***REDACTED***" if value not in (None, "") else value
+
+    if isinstance(value, dict):
+        return {k: redact_config_values(v, k) for k, v in value.items()}
+
+    if isinstance(value, list):
+        return [redact_config_values(item) for item in value]
+
+    return value
+
+
+def get_redacted_app_config() -> Dict[str, Any]:
+    config_payload = {
+        "redis": asdict(redis_config),
+        "gladia": asdict(gladia_config),
+    }
+    return redact_config_values(config_payload)
