@@ -33,7 +33,7 @@ jobs:
         run: uv run pytest tests/ --ignore=tests/integration -v --cov --cov-report=xml --cov-fail-under=65
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: coverage.xml
