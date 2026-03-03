@@ -10,7 +10,13 @@ from livekit import rtc
 
 from redis_manager import RedisManager
 from gladia_stt_agent import GladiaSttAgent
-from config import get_redacted_app_config, gladia_config, redis_config
+from config import (
+    get_redacted_app_config,
+    gladia_config,
+    openai_config,
+    redis_config,
+    stt_provider,
+)
 from utils import coerce_min_utterance_length_seconds, coerce_partial_utterances
 
 load_dotenv()
@@ -34,7 +40,14 @@ async def entrypoint(ctx: JobContext):
     _log_startup_configuration()
 
     redis_manager = RedisManager(redis_config)
-    agent = GladiaSttAgent(gladia_config)
+    if stt_provider == "openai":
+        from openai_stt_agent import OpenAiSttAgent
+
+        agent = OpenAiSttAgent(openai_config)
+        active_stt_config = openai_config
+    else:
+        agent = GladiaSttAgent(gladia_config)
+        active_stt_config = gladia_config
 
     async def on_redis_message(message_data: str):
         try:
@@ -108,15 +121,16 @@ async def entrypoint(ctx: JobContext):
 
         for alternative in event.alternatives:
             if _is_below_min_confidence(
-                alternative, gladia_config.min_confidence_final
+                alternative, active_stt_config.min_confidence_final
             ):
                 logging.debug(
                     f"Discarding final transcript for {participant.identity}: "
-                    f"low confidence ({alternative.confidence} < {gladia_config.min_confidence_final})."
+                    f"low confidence ({alternative.confidence} < {active_stt_config.min_confidence_final})."
                 )
                 continue
 
-            transcript_lang = alternative.language
+            # OpenAI STT may not report a language; fall back to the original lang.
+            transcript_lang = alternative.language or original_lang
             text = alternative.text
             bbb_locale = None
             start_time_adjusted = math.floor(open_time + alternative.start_time)
@@ -186,15 +200,16 @@ async def entrypoint(ctx: JobContext):
 
         for alternative in event.alternatives:
             if _is_below_min_confidence(
-                alternative, gladia_config.min_confidence_interim
+                alternative, active_stt_config.min_confidence_interim
             ):
                 logging.debug(
                     f"Discarding interim transcript for {participant.identity}: "
-                    f"low confidence ({alternative.confidence} < {gladia_config.min_confidence_interim})."
+                    f"low confidence ({alternative.confidence} < {active_stt_config.min_confidence_interim})."
                 )
                 continue
 
-            transcript_lang = alternative.language
+            # OpenAI STT may not report a language; fall back to the original lang.
+            transcript_lang = alternative.language or original_lang
             text = alternative.text
             start_time_adjusted = math.floor(open_time + alternative.start_time)
             end_time_adjusted = math.floor(open_time + alternative.end_time)

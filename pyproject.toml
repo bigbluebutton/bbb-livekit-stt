@@ -5,7 +5,7 @@ description = "Provides STT for BigBlueButton meetings using LiveKit as their au
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "livekit-agents[gladia]~=1.4",
+    "livekit-agents[gladia,openai]~=1.4",
     "python-dotenv~=1.1.1",
     "redis~=6.4.0",
     "nest-asyncio~=1.6.0",
@@ -25,7 +25,7 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.coverage.run]
-source = ["config", "events", "gladia_stt_agent", "redis_manager", "utils"]
+source = ["config", "events", "gladia_stt_agent", "openai_stt_agent", "redis_manager", "utils"]
 omit = ["tests/*"]
 
 [tool.coverage.report]

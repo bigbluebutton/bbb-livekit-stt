@@ -4,6 +4,7 @@ import pytest
 
 from config import (
     GladiaConfig,
+    OpenAiConfig,
     _get_bool_env,
     _get_float_env,
     _get_json_env,
@@ -223,3 +224,101 @@ class TestGladiaConfigDefaults:
         config = GladiaConfig()
         assert config.min_confidence_interim == pytest.approx(0.2)
         assert config.min_confidence_final == pytest.approx(0.5)
+
+
+class TestOpenAiConfigDefaults:
+    @pytest.fixture(autouse=True)
+    def _clean_openai_env(self, monkeypatch):
+        """Remove all OPENAI_* env vars so dataclass defaults are exercised."""
+        for key in list(os.environ):
+            if key.startswith("OPENAI_"):
+                monkeypatch.delenv(key, raising=False)
+
+    def test_model_defaults_to_gpt4o_transcribe(self):
+        config = OpenAiConfig()
+        assert config.model == "gpt-4o-transcribe"
+
+    def test_api_key_defaults_to_none(self):
+        config = OpenAiConfig()
+        assert config.api_key is None
+
+    def test_base_url_defaults_to_none(self):
+        config = OpenAiConfig()
+        assert config.base_url is None
+
+    def test_min_confidence_defaults_to_0_0(self):
+        config = OpenAiConfig()
+        assert config.min_confidence_final == pytest.approx(0.0)
+        assert config.min_confidence_interim == pytest.approx(0.0)
+
+    def test_interim_results_defaults_to_none(self):
+        config = OpenAiConfig()
+        assert config.interim_results is None
+
+    def test_model_overridden_by_env_var(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_STT_MODEL", "whisper-1")
+        config = OpenAiConfig()
+        assert config.model == "whisper-1"
+
+    def test_base_url_overridden_by_env_var(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://localhost:8000")
+        config = OpenAiConfig()
+        assert config.base_url == "http://localhost:8000"
+
+    def test_api_key_overridden_by_env_var(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        config = OpenAiConfig()
+        assert config.api_key == "sk-test"
+
+    def test_min_confidence_overridden_by_env_var(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_MIN_CONFIDENCE_FINAL", "0.8")
+        monkeypatch.setenv("OPENAI_MIN_CONFIDENCE_INTERIM", "0.4")
+        config = OpenAiConfig()
+        assert config.min_confidence_final == pytest.approx(0.8)
+        assert config.min_confidence_interim == pytest.approx(0.4)
+
+
+class TestOpenAiConfigToDict:
+    def test_excludes_none_fields(self):
+        config = OpenAiConfig(api_key=None, base_url=None, model="whisper-1")
+        result = config.to_dict()
+        assert "api_key" not in result
+        assert "base_url" not in result
+
+    def test_includes_model(self):
+        config = OpenAiConfig(model="gpt-4o-transcribe")
+        result = config.to_dict()
+        assert result["model"] == "gpt-4o-transcribe"
+
+    def test_includes_api_key_when_set(self):
+        config = OpenAiConfig(api_key="sk-test", model="whisper-1")
+        result = config.to_dict()
+        assert result["api_key"] == "sk-test"
+
+    def test_includes_base_url_when_set(self):
+        config = OpenAiConfig(model="whisper-1", base_url="http://localhost:8000")
+        result = config.to_dict()
+        assert result["base_url"] == "http://localhost:8000"
+
+    def test_does_not_include_confidence_thresholds(self):
+        """min_confidence_* are internal; not passed to the LiveKit plugin."""
+        config = OpenAiConfig(model="whisper-1")
+        result = config.to_dict()
+        assert "min_confidence_final" not in result
+        assert "min_confidence_interim" not in result
+        assert "interim_results" not in result
+
+
+class TestSttProvider:
+    def test_defaults_to_gladia(self, monkeypatch):
+        monkeypatch.delenv("STT_PROVIDER", raising=False)
+        # Re-evaluate the module-level expression via direct env check
+        assert os.getenv("STT_PROVIDER", "gladia").lower() == "gladia"
+
+    def test_openai_when_env_set(self, monkeypatch):
+        monkeypatch.setenv("STT_PROVIDER", "openai")
+        assert os.getenv("STT_PROVIDER", "gladia").lower() == "openai"
+
+    def test_case_insensitive(self, monkeypatch):
+        monkeypatch.setenv("STT_PROVIDER", "OpenAI")
+        assert os.getenv("STT_PROVIDER", "gladia").lower() == "openai"

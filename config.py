@@ -223,6 +223,35 @@ class GladiaConfig:
 gladia_config = GladiaConfig()
 
 
+@dataclass
+class OpenAiConfig:
+    api_key: str | None = field(default_factory=lambda: os.getenv("OPENAI_API_KEY"))
+    model: str = field(
+        default_factory=lambda: os.getenv("OPENAI_STT_MODEL", "gpt-4o-transcribe")
+    )
+    base_url: str | None = field(
+        default_factory=lambda: os.getenv("OPENAI_BASE_URL", None)
+    )
+    # OpenAI STT does not return confidence scores; default 0.0 disables filtering
+    min_confidence_final: float = field(
+        default_factory=lambda: _get_float_env("OPENAI_MIN_CONFIDENCE_FINAL", 0.0)
+    )
+    min_confidence_interim: float = field(
+        default_factory=lambda: _get_float_env("OPENAI_MIN_CONFIDENCE_INTERIM", 0.0)
+    )
+    interim_results: bool | None = field(
+        default_factory=lambda: _get_bool_env("OPENAI_INTERIM_RESULTS", None)
+    )
+
+    def to_dict(self):
+        data = {"api_key": self.api_key, "model": self.model, "base_url": self.base_url}
+        return {k: v for k, v in data.items() if v is not None}
+
+
+openai_config = OpenAiConfig()
+stt_provider = os.getenv("STT_PROVIDER", "gladia").lower()
+
+
 def redact_config_values(value: object, key: str | None = None) -> object:
     if key and key.lower() in REDACTED_CONFIG_KEYS:
         return "***REDACTED***" if value not in (None, "") else value
@@ -238,7 +267,9 @@ def redact_config_values(value: object, key: str | None = None) -> object:
 
 def get_redacted_app_config() -> Dict[str, Any]:
     config_payload = {
+        "stt_provider": stt_provider,
         "redis": asdict(redis_config),
         "gladia": asdict(gladia_config),
+        "openai": asdict(openai_config),
     }
     return redact_config_values(config_payload)
