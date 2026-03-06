@@ -8,6 +8,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 ## UNRELEASED
 
 * feat: add GladiaSttAgent provider and factory
+* refactor: move GladiaConfig to providers package, delete old agent module
 * feat(tests): add unit and integration tests with pytest
 * feat(tests): add coverage reporting with pytest-cov
 * feat(tests): add tests for v0.2.0 changes (utils coercions, config redaction, on_track_subscribed fix, new defaults)
