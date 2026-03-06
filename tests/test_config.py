@@ -3,7 +3,6 @@ import os
 import pytest
 
 from config import (
-    GladiaConfig,
     _get_bool_env,
     _get_float_env,
     _get_json_env,
@@ -11,6 +10,7 @@ from config import (
     _get_map_env,
     redact_config_values,
 )
+from providers.gladia import GladiaConfig
 
 
 class TestGetBoolEnv:
