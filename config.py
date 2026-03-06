@@ -77,6 +77,8 @@ class RedisConfig:
 
 redis_config = RedisConfig()
 
+stt_provider = os.getenv("STT_PROVIDER", "gladia").lower()
+
 
 # This is a mapping of the Gladia STT plugin configuration options to environment variables.
 # The plugin uses the defaults if the environment variables are not set.
@@ -236,9 +238,9 @@ def redact_config_values(value: object, key: str | None = None) -> object:
     return value
 
 
-def get_redacted_app_config() -> Dict[str, Any]:
+def get_redacted_app_config(stt_config) -> Dict[str, Any]:
     config_payload = {
         "redis": asdict(redis_config),
-        "gladia": asdict(gladia_config),
+        "stt": asdict(stt_config),
     }
     return redact_config_values(config_payload)

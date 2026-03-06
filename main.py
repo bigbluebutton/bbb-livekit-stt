@@ -9,32 +9,27 @@ from livekit.agents import JobContext, WorkerOptions, cli, stt
 from livekit import rtc
 
 from redis_manager import RedisManager
-from gladia_stt_agent import GladiaSttAgent
-from config import get_redacted_app_config, gladia_config, redis_config
+from providers import create_agent
+from config import get_redacted_app_config, redis_config, stt_provider
 from utils import coerce_min_utterance_length_seconds, coerce_partial_utterances
 
 load_dotenv()
 
 
-def _log_startup_configuration():
+def _log_startup_configuration(stt_config):
     logging.debug(
         "Application configuration: %s",
-        json.dumps(get_redacted_app_config(), sort_keys=True),
+        json.dumps(get_redacted_app_config(stt_config), sort_keys=True),
     )
-
-
-def _is_below_min_confidence(
-    alternative: stt.SpeechData, min_confidence: float
-) -> bool:
-    return alternative.confidence < min_confidence
 
 
 async def entrypoint(ctx: JobContext):
     nest_asyncio.apply()
-    _log_startup_configuration()
 
     redis_manager = RedisManager(redis_config)
-    agent = GladiaSttAgent(gladia_config)
+    agent = create_agent(stt_provider)
+
+    _log_startup_configuration(agent.config)
 
     async def on_redis_message(message_data: str):
         try:
@@ -107,15 +102,6 @@ async def entrypoint(ctx: JobContext):
         original_lang = original_locale.split("-")[0]
 
         for alternative in event.alternatives:
-            if _is_below_min_confidence(
-                alternative, gladia_config.min_confidence_final
-            ):
-                logging.debug(
-                    f"Discarding final transcript for {participant.identity}: "
-                    f"low confidence ({alternative.confidence} < {gladia_config.min_confidence_final})."
-                )
-                continue
-
             transcript_lang = alternative.language
             text = alternative.text
             bbb_locale = None
@@ -143,7 +129,7 @@ async def entrypoint(ctx: JobContext):
                 bbb_locale = original_locale
             else:
                 # This is a translated transcript, look it up in the map
-                bbb_locale = gladia_config.translation_lang_map.get(transcript_lang)
+                bbb_locale = agent.translation_lang_map.get(transcript_lang)
 
             if not bbb_locale:
                 logging.warning(
@@ -185,15 +171,6 @@ async def entrypoint(ctx: JobContext):
         min_utterance_length = p_settings.get("min_utterance_length", 0)
 
         for alternative in event.alternatives:
-            if _is_below_min_confidence(
-                alternative, gladia_config.min_confidence_interim
-            ):
-                logging.debug(
-                    f"Discarding interim transcript for {participant.identity}: "
-                    f"low confidence ({alternative.confidence} < {gladia_config.min_confidence_interim})."
-                )
-                continue
-
             transcript_lang = alternative.language
             text = alternative.text
             start_time_adjusted = math.floor(open_time + alternative.start_time)
@@ -241,7 +218,7 @@ async def entrypoint(ctx: JobContext):
             if transcript_lang == original_lang:
                 bbb_locale = original_locale
             else:
-                bbb_locale = gladia_config.translation_lang_map.get(transcript_lang)
+                bbb_locale = agent.translation_lang_map.get(transcript_lang)
 
             if not bbb_locale:
                 logging.warning(
