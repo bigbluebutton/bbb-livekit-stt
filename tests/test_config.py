@@ -101,7 +101,7 @@ class TestGetMapEnv:
         assert result == {"en": "en-AU", "pt": "pt-PT"}
 
 
-class TestGladiaConfigToDict:
+class TestGladiaConfigToSttKwargs:
     def test_excludes_optional_none_fields(self):
         config = GladiaConfig(
             api_key="test-key",
@@ -110,7 +110,7 @@ class TestGladiaConfigToDict:
             code_switching=None,
             energy_filter=None,
         )
-        result = config.to_dict()
+        result = config.to_stt_kwargs()
         assert "interim_results" not in result
         assert "languages" not in result
         assert "code_switching" not in result
@@ -123,7 +123,7 @@ class TestGladiaConfigToDict:
             languages=["en", "fr"],
             code_switching=False,
         )
-        result = config.to_dict()
+        result = config.to_stt_kwargs()
         assert result["api_key"] == "test-key"
         assert result["interim_results"] is True
         assert result["languages"] == ["en", "fr"]

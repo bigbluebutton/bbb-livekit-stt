@@ -18,7 +18,7 @@ class GladiaSttAgent(EventEmitter):
     def __init__(self, config: GladiaConfig):
         super().__init__()
         self.config = config
-        self.stt = GladiaSTT(**config.to_dict())
+        self.stt = GladiaSTT(**config.to_stt_kwargs())
         self.ctx: JobContext | None = None
         self.room: rtc.Room | None = None
         self.processing_info = {}

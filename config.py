@@ -187,7 +187,7 @@ class GladiaConfig:
         )
     )
 
-    def to_dict(self):
+    def to_stt_kwargs(self):
         # Exclude None values so defaults are used by the plugin
         data = {
             "api_key": self.api_key,
