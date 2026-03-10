@@ -3,11 +3,12 @@ import contextlib
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import numpy as np
 from livekit import rtc
 from livekit.agents import stt
 
 from config import OpenAiConfig
-from openai_stt_agent import OpenAiSttAgent
+from openai_stt_agent import OpenAiSttAgent, _SILENCE_THRESHOLD_RMS
 
 
 def _make_agent(interim_results=None, **kwargs):
@@ -50,6 +51,21 @@ def _make_participant(identity, audio_track=None):
     return participant
 
 
+def _make_audio_event(amplitude: int = 0) -> MagicMock:
+    """Create a mock audio event with PCM bytes at the given amplitude."""
+    samples = np.full(160, amplitude, dtype=np.int16)
+    event = MagicMock()
+    event.frame.data = samples.tobytes()
+    event.frame.sample_rate = 16000
+    event.frame.samples_per_channel = 160
+    return event
+
+
+def _make_loud_event() -> MagicMock:
+    """Audio event with RMS energy above the speech threshold."""
+    return _make_audio_event(amplitude=int(_SILENCE_THRESHOLD_RMS * 2))
+
+
 class TestSanitizeLocale:
     def test_strips_region_from_bcp47_locale(self):
         agent = _make_agent()
@@ -73,7 +89,7 @@ class TestStopTranscriptionForUser:
     def test_cancels_task_and_removes_from_processing_info(self):
         agent = _make_agent()
         mock_task = MagicMock()
-        agent.processing_info["user_123"] = {"task": mock_task, "stream": MagicMock()}
+        agent.processing_info["user_123"] = {"task": mock_task}
 
         agent.stop_transcription_for_user("user_123")
 
@@ -103,7 +119,7 @@ class TestUpdateLocaleForUser:
         agent = _make_agent_with_room(participants={"pid": participant})
         agent.participant_settings["user_1"] = {"locale": "en", "provider": "openai"}
         mock_task = MagicMock()
-        agent.processing_info["user_1"] = {"stream": MagicMock(), "task": mock_task}
+        agent.processing_info["user_1"] = {"task": mock_task}
 
         with (
             patch.object(agent, "stop_transcription_for_user") as mock_stop,
@@ -140,7 +156,7 @@ class TestOnParticipantDisconnected:
         agent = _make_agent()
         agent.participant_settings["user_1"] = {"locale": "en", "provider": "openai"}
         mock_task = MagicMock()
-        agent.processing_info["user_1"] = {"task": mock_task, "stream": MagicMock()}
+        agent.processing_info["user_1"] = {"task": mock_task}
 
         mock_participant = MagicMock()
         mock_participant.identity = "user_1"
@@ -221,14 +237,15 @@ class TestStartTranscriptionForUser:
         agent = _make_agent_with_room(participants={"pid": participant})
 
         existing_task = MagicMock()
-        agent.processing_info["user_1"] = {"task": existing_task, "stream": MagicMock()}
+        agent.processing_info["user_1"] = {"task": existing_task}
 
         with caplog.at_level(logging.DEBUG):
             agent.start_transcription_for_user("user_1", "en-US", "openai")
 
         assert agent.processing_info["user_1"]["task"] is existing_task
 
-    async def test_creates_stream_and_task_on_success(self):
+    async def test_creates_task_on_success(self):
+        """Happy path: participant with audio track → task created."""
         mock_track = MagicMock()
         mock_track.kind = rtc.TrackKind.KIND_AUDIO
         participant = _make_participant("user_1", audio_track=mock_track)
@@ -239,7 +256,6 @@ class TestStartTranscriptionForUser:
 
             assert "user_1" in agent.processing_info
             info = agent.processing_info["user_1"]
-            assert "stream" in info
             assert "task" in info
             assert agent.participant_settings["user_1"]["locale"] == "en-US"
             assert agent.participant_settings["user_1"]["provider"] == "openai"
@@ -248,24 +264,28 @@ class TestStartTranscriptionForUser:
             with contextlib.suppress(asyncio.CancelledError):
                 await info["task"]
 
-    async def test_sanitizes_locale_before_creating_stream(self):
-        """Locale 'pt-BR' should be sanitized to 'pt' for OpenAI STT."""
+    async def test_passes_sanitized_locale_to_pipeline(self):
+        """Locale 'pt-BR' should be sanitized to 'pt' when starting the pipeline."""
         mock_track = MagicMock()
         mock_track.kind = rtc.TrackKind.KIND_AUDIO
         participant = _make_participant("user_1", audio_track=mock_track)
         agent = _make_agent_with_room(participants={"pid": participant})
 
-        with patch("openai_stt_agent.rtc.AudioStream"):
+        with patch.object(
+            agent, "_run_transcription_pipeline", new_callable=AsyncMock
+        ) as mock_pipeline:
             agent.start_transcription_for_user("user_1", "pt-BR", "openai")
-            agent.stt.stream.assert_called_once_with(language="pt")
+            await asyncio.sleep(0)  # let the task start
 
-            agent.processing_info["user_1"]["task"].cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await agent.processing_info["user_1"]["task"]
+        mock_pipeline.assert_called_once_with(participant, mock_track, "pt")
+
+        # Clean up the task
+        agent.processing_info.pop("user_1", None)
 
 
 class TestRunTranscriptionPipeline:
     async def test_cancellation_cleans_up_processing_info(self):
+        """CancelledError should be caught and processing_info entry removed."""
         agent = _make_agent()
         mock_participant = MagicMock(spec=rtc.RemoteParticipant)
         mock_participant.identity = "user_1"
@@ -274,99 +294,87 @@ class TestRunTranscriptionPipeline:
         mock_audio_stream = AsyncMock()
         mock_audio_stream.__aiter__.side_effect = asyncio.CancelledError
 
-        mock_stt_stream = AsyncMock()
-        mock_stt_stream.__aiter__.return_value = iter([])
-
-        agent.processing_info["user_1"] = {
-            "stream": mock_stt_stream,
-            "task": MagicMock(),
-        }
+        agent.processing_info["user_1"] = {"task": MagicMock()}
 
         with patch("openai_stt_agent.rtc.AudioStream", return_value=mock_audio_stream):
-            await agent._run_transcription_pipeline(
-                mock_participant, mock_track, mock_stt_stream
-            )
+            await agent._run_transcription_pipeline(mock_participant, mock_track, "en")
 
         assert "user_1" not in agent.processing_info
 
     async def test_emits_final_transcript_event(self):
+        """Speech frames trigger a final_transcript event via recognize()."""
         agent = _make_agent()
         mock_participant = MagicMock(spec=rtc.RemoteParticipant)
         mock_participant.identity = "user_1"
         mock_track = MagicMock()
 
+        # One loud audio frame followed by end-of-stream → triggers end-of-stream flush
+        loud_event = _make_loud_event()
         mock_audio_stream = AsyncMock()
-        mock_audio_stream.__aiter__.return_value = iter([])
+        mock_audio_stream.__aiter__.return_value = iter([loud_event])
 
-        mock_event = MagicMock()
-        mock_event.type = stt.SpeechEventType.FINAL_TRANSCRIPT
-        mock_stt_stream = AsyncMock()
-        mock_stt_stream.__aiter__.return_value = iter([mock_event])
+        mock_stt_event = MagicMock()
+        mock_stt_event.alternatives = [MagicMock(text="hello world")]
+        agent.stt.recognize = AsyncMock(return_value=mock_stt_event)
 
         emitted = []
         agent.on("final_transcript", lambda **kw: emitted.append(kw))
 
         with patch("openai_stt_agent.rtc.AudioStream", return_value=mock_audio_stream):
-            await agent._run_transcription_pipeline(
-                mock_participant, mock_track, mock_stt_stream
-            )
+            await agent._run_transcription_pipeline(mock_participant, mock_track, "en")
             await asyncio.sleep(0)
 
         assert len(emitted) == 1
         assert emitted[0]["participant"] is mock_participant
-        assert emitted[0]["event"] is mock_event
+        assert emitted[0]["event"] is mock_stt_event
 
-    async def test_emits_interim_transcript_when_enabled(self):
-        agent = _make_agent(interim_results=True)
+    async def test_does_not_emit_when_recognize_returns_empty_text(self):
+        """No event should be emitted if the transcription result is empty."""
+        agent = _make_agent()
         mock_participant = MagicMock(spec=rtc.RemoteParticipant)
         mock_participant.identity = "user_1"
         mock_track = MagicMock()
 
+        loud_event = _make_loud_event()
         mock_audio_stream = AsyncMock()
-        mock_audio_stream.__aiter__.return_value = iter([])
+        mock_audio_stream.__aiter__.return_value = iter([loud_event])
 
-        mock_event = MagicMock()
-        mock_event.type = stt.SpeechEventType.INTERIM_TRANSCRIPT
-        mock_stt_stream = AsyncMock()
-        mock_stt_stream.__aiter__.return_value = iter([mock_event])
+        mock_stt_event = MagicMock()
+        mock_stt_event.alternatives = [MagicMock(text="")]
+        agent.stt.recognize = AsyncMock(return_value=mock_stt_event)
 
         emitted = []
-        agent.on("interim_transcript", lambda **kw: emitted.append(kw))
+        agent.on("final_transcript", lambda **kw: emitted.append(kw))
 
         with patch("openai_stt_agent.rtc.AudioStream", return_value=mock_audio_stream):
-            await agent._run_transcription_pipeline(
-                mock_participant, mock_track, mock_stt_stream
-            )
-            await asyncio.sleep(0)
-
-        assert len(emitted) == 1
-
-    async def test_suppresses_interim_transcript_when_disabled(self):
-        agent = _make_agent(interim_results=False)
-        mock_participant = MagicMock(spec=rtc.RemoteParticipant)
-        mock_participant.identity = "user_1"
-        mock_track = MagicMock()
-
-        mock_audio_stream = AsyncMock()
-        mock_audio_stream.__aiter__.return_value = iter([])
-
-        mock_event = MagicMock()
-        mock_event.type = stt.SpeechEventType.INTERIM_TRANSCRIPT
-        mock_stt_stream = AsyncMock()
-        mock_stt_stream.__aiter__.return_value = iter([mock_event])
-
-        emitted = []
-        agent.on("interim_transcript", lambda **kw: emitted.append(kw))
-
-        with patch("openai_stt_agent.rtc.AudioStream", return_value=mock_audio_stream):
-            await agent._run_transcription_pipeline(
-                mock_participant, mock_track, mock_stt_stream
-            )
-            await asyncio.sleep(0)
+            await agent._run_transcription_pipeline(mock_participant, mock_track, "en")
 
         assert len(emitted) == 0
 
+    async def test_does_not_emit_for_silent_audio(self):
+        """Silent frames (below energy threshold) should not trigger recognition."""
+        agent = _make_agent()
+        mock_participant = MagicMock(spec=rtc.RemoteParticipant)
+        mock_participant.identity = "user_1"
+        mock_track = MagicMock()
+
+        silent_event = _make_audio_event(amplitude=0)
+        mock_audio_stream = AsyncMock()
+        mock_audio_stream.__aiter__.return_value = iter([silent_event])
+
+        agent.stt.recognize = AsyncMock()
+
+        emitted = []
+        agent.on("final_transcript", lambda **kw: emitted.append(kw))
+
+        with patch("openai_stt_agent.rtc.AudioStream", return_value=mock_audio_stream):
+            await agent._run_transcription_pipeline(mock_participant, mock_track, "en")
+
+        agent.stt.recognize.assert_not_called()
+        assert len(emitted) == 0
+
     async def test_generic_exception_cleans_up_processing_info(self):
+        """Unexpected exceptions should be caught and processing_info cleaned up."""
         agent = _make_agent()
         mock_participant = MagicMock(spec=rtc.RemoteParticipant)
         mock_participant.identity = "user_1"
@@ -375,29 +383,22 @@ class TestRunTranscriptionPipeline:
         mock_audio_stream = AsyncMock()
         mock_audio_stream.__aiter__.side_effect = RuntimeError("boom")
 
-        mock_stt_stream = AsyncMock()
-        mock_stt_stream.__aiter__.return_value = iter([])
-
-        agent.processing_info["user_1"] = {
-            "stream": mock_stt_stream,
-            "task": MagicMock(),
-        }
+        agent.processing_info["user_1"] = {"task": MagicMock()}
 
         with patch("openai_stt_agent.rtc.AudioStream", return_value=mock_audio_stream):
-            await agent._run_transcription_pipeline(
-                mock_participant, mock_track, mock_stt_stream
-            )
+            await agent._run_transcription_pipeline(mock_participant, mock_track, "en")
 
         assert "user_1" not in agent.processing_info
 
 
 class TestCleanup:
     async def test_cleanup_stops_all_active_transcriptions(self):
+        """_cleanup() should cancel all active tasks."""
         agent = _make_agent()
         tasks = {}
         for uid in ("user_1", "user_2", "user_3"):
             mock_task = MagicMock()
-            agent.processing_info[uid] = {"task": mock_task, "stream": MagicMock()}
+            agent.processing_info[uid] = {"task": mock_task}
             tasks[uid] = mock_task
 
         await agent._cleanup()

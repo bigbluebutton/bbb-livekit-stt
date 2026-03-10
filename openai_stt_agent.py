@@ -2,6 +2,7 @@ import asyncio
 import logging
 import time
 
+import numpy as np
 from livekit import rtc
 from livekit.agents import (
     AutoSubscribe,
@@ -12,6 +13,14 @@ from livekit.plugins import openai as openai_plugin
 
 from config import OpenAiConfig
 from events import EventEmitter
+
+# Energy-based voice activity detection parameters.
+# RMS threshold (int16 scale 0–32768): frames below this are considered silence.
+_SILENCE_THRESHOLD_RMS = 500
+# Seconds of continuous silence after speech before the segment is flushed.
+_SILENCE_DURATION_S = 0.8
+# Maximum segment duration before a forced flush (prevents unbounded buffering).
+_MAX_BUFFER_DURATION_S = 30.0
 
 
 class OpenAiSttAgent(EventEmitter):
@@ -74,15 +83,11 @@ class OpenAiSttAgent(EventEmitter):
             )
             return
 
-        openai_locale = self._sanitize_locale(locale)
-        stt_stream = self.stt.stream(language=openai_locale)
+        language = self._sanitize_locale(locale)
         task = asyncio.create_task(
-            self._run_transcription_pipeline(participant, track, stt_stream)
+            self._run_transcription_pipeline(participant, track, language)
         )
-        self.processing_info[participant.identity] = {
-            "stream": stt_stream,
-            "task": task,
-        }
+        self.processing_info[participant.identity] = {"task": task}
         logging.info(
             f"Started transcription for {participant.identity} with locale {locale}."
         )
@@ -104,7 +109,7 @@ class OpenAiSttAgent(EventEmitter):
             provider = self.participant_settings.get(user_id, {}).get(
                 "provider", "openai"
             )
-            # OpenAI STT does not support live stream.update_options(); restart the pipeline.
+            # Restart the pipeline with the new locale.
             self.stop_transcription_for_user(user_id)
             self.start_transcription_for_user(user_id, locale, provider)
         else:
@@ -179,40 +184,88 @@ class OpenAiSttAgent(EventEmitter):
         self,
         participant: rtc.RemoteParticipant,
         track: rtc.Track,
-        stt_stream: stt.SpeechStream,
+        language: str,
     ):
+        """Collect audio, segment by silence, and transcribe via REST API.
+
+        The OpenAI STT plugin's stream() method requires the Realtime WebSocket
+        API which not all backends support.  Using recognize() hits the standard
+        REST /audio/transcriptions endpoint and works with any Whisper-compatible
+        backend.
+
+        TODO: Support the /realtime WebSocket endpoint as an opt-in mode (e.g.
+        via an OpenAiConfig flag like `use_realtime: bool`).  When enabled,
+        delegate to openai_plugin.STT.stream() directly instead of this
+        energy-based segmentation loop.  This would unlock interim results and
+        lower latency for backends that implement the OpenAI Realtime API
+        (e.g. gpt-4o-transcribe).
+        """
         audio_stream = rtc.AudioStream(track)
         self.open_time = time.time()
 
-        async def forward_audio_task():
-            try:
-                async for audio_event in audio_stream:
-                    stt_stream.push_frame(audio_event.frame)
-            finally:
-                stt_stream.flush()
+        speech_buffer: list[rtc.AudioFrame] = []
+        buffer_duration = 0.0
+        silence_duration = 0.0
+        was_speaking = False
 
-        async def process_stt_task():
-            async for event in stt_stream:
-                if event.type == stt.SpeechEventType.FINAL_TRANSCRIPT:
+        async def flush_segment(frames: list[rtc.AudioFrame]) -> None:
+            if not frames:
+                return
+            try:
+                event = await self.stt.recognize(buffer=frames, language=language)
+                if event.alternatives and event.alternatives[0].text:
                     self.emit(
                         "final_transcript",
                         participant=participant,
                         event=event,
                         open_time=self.open_time,
                     )
-                elif (
-                    event.type == stt.SpeechEventType.INTERIM_TRANSCRIPT
-                    and self.config.interim_results
-                ):
-                    self.emit(
-                        "interim_transcript",
-                        participant=participant,
-                        event=event,
-                        open_time=self.open_time,
-                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logging.error(
+                    f"Error transcribing segment for {participant.identity}: {e}"
+                )
 
         try:
-            await asyncio.gather(forward_audio_task(), process_stt_task())
+            async for audio_event in audio_stream:
+                frame = audio_event.frame
+                samples = np.frombuffer(frame.data, dtype=np.int16)
+                rms = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
+                is_speaking = rms > _SILENCE_THRESHOLD_RMS
+                frame_duration = frame.samples_per_channel / frame.sample_rate
+
+                if is_speaking:
+                    speech_buffer.append(frame)
+                    buffer_duration += frame_duration
+                    silence_duration = 0.0
+                    was_speaking = True
+                elif was_speaking:
+                    # Carry silence frames so the segment has natural trailing audio.
+                    speech_buffer.append(frame)
+                    buffer_duration += frame_duration
+                    silence_duration += frame_duration
+
+                    if (
+                        silence_duration >= _SILENCE_DURATION_S
+                        or buffer_duration >= _MAX_BUFFER_DURATION_S
+                    ):
+                        await flush_segment(speech_buffer[:])
+                        speech_buffer.clear()
+                        buffer_duration = 0.0
+                        silence_duration = 0.0
+                        was_speaking = False
+                elif buffer_duration >= _MAX_BUFFER_DURATION_S:
+                    # Safety flush even without trailing silence.
+                    await flush_segment(speech_buffer[:])
+                    speech_buffer.clear()
+                    buffer_duration = 0.0
+                    silence_duration = 0.0
+                    was_speaking = False
+
+            # Flush any remaining buffered speech at end of stream.
+            await flush_segment(speech_buffer[:])
+
         except asyncio.CancelledError:
             logging.info(f"Transcription for {participant.identity} was cancelled.")
         except Exception as e:

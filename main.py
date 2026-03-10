@@ -67,7 +67,7 @@ async def entrypoint(ctx: JobContext):
             meeting_id = routing.get("meetingId")
             user_id = routing.get("userId")
 
-            if meeting_id != agent.room.name:
+            if agent.room is None or meeting_id != agent.room.name:
                 return
 
             if event_name == RedisManager.USER_SPEECH_LOCALE_CHANGED_EVT_MSG:
