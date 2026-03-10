@@ -2,6 +2,7 @@ import asyncio
 import logging
 import time
 
+import aiohttp
 import numpy as np
 from livekit import rtc
 from livekit.agents import (
@@ -9,7 +10,6 @@ from livekit.agents import (
     JobContext,
     stt,
 )
-from livekit.plugins import openai as openai_plugin
 
 from config import OpenAiConfig
 from events import EventEmitter
@@ -27,13 +27,46 @@ class OpenAiSttAgent(EventEmitter):
     def __init__(self, config: OpenAiConfig):
         super().__init__()
         self.config = config
-        self.stt = openai_plugin.STT(**config.to_dict())
         self.ctx: JobContext | None = None
         self.room: rtc.Room | None = None
         self.processing_info = {}
         self.participant_settings = {}
         self.open_time = time.time()
         self._shutdown = asyncio.Event()
+        self._http_session: aiohttp.ClientSession | None = None
+
+    def _get_http_session(self) -> aiohttp.ClientSession:
+        if self._http_session is None:
+            self._http_session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30)
+            )
+        return self._http_session
+
+    async def _transcribe_wav(self, wav_bytes: bytes, language: str) -> str:
+        """Call the OpenAI-compatible REST endpoint directly.
+
+        Constructs the URL as ``{base_url}/v1/audio/transcriptions`` so that
+        custom backends (e.g. llm.vates.tech/api/) work correctly regardless of
+        whether the OpenAI SDK would strip or double the ``/v1`` path segment.
+        """
+        base_url = (self.config.base_url or "https://api.openai.com").rstrip("/")
+        url = f"{base_url}/v1/audio/transcriptions"
+
+        form = aiohttp.FormData()
+        form.add_field(
+            "file", wav_bytes, filename="audio.wav", content_type="audio/wav"
+        )
+        form.add_field("model", self.config.model)
+        form.add_field("response_format", "json")
+        if language:
+            form.add_field("language", language)
+
+        headers = {"Authorization": f"Bearer {self.config.api_key}"}
+        session = self._get_http_session()
+        async with session.post(url, data=form, headers=headers) as resp:
+            resp.raise_for_status()
+            result = await resp.json()
+        return result.get("text", "").strip()
 
     async def start(self, ctx: JobContext):
         self.ctx = ctx
@@ -55,6 +88,10 @@ class OpenAiSttAgent(EventEmitter):
             self.stop_transcription_for_user(user_id)
 
         await asyncio.sleep(0.1)
+
+        if self._http_session:
+            await self._http_session.close()
+            self._http_session = None
 
     def start_transcription_for_user(self, user_id: str, locale: str, provider: str):
         settings = self.participant_settings.setdefault(user_id, {})
@@ -212,8 +249,13 @@ class OpenAiSttAgent(EventEmitter):
             if not frames:
                 return
             try:
-                event = await self.stt.recognize(buffer=frames, language=language)
-                if event.alternatives and event.alternatives[0].text:
+                wav_bytes = rtc.combine_audio_frames(frames).to_wav_bytes()
+                text = await self._transcribe_wav(wav_bytes, language)
+                if text:
+                    event = stt.SpeechEvent(
+                        type=stt.SpeechEventType.FINAL_TRANSCRIPT,
+                        alternatives=[stt.SpeechData(text=text, language=language)],
+                    )
                     self.emit(
                         "final_transcript",
                         participant=participant,
