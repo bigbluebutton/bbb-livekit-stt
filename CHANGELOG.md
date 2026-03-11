@@ -7,6 +7,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 
 ## UNRELEASED
 
+* feat(openai): add OpenAI STT provider support (official and compatible endpoints)
 * feat: add GladiaSttAgent provider and factory
 * refactor: move GladiaConfig to providers package, delete old agent module
 * feat(tests): add unit and integration tests with pytest

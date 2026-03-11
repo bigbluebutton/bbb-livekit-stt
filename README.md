@@ -3,10 +3,10 @@
 This application provides Speech-to-Text (STT) for BigBlueButton meetings using LiveKit
 as their audio bridge.
 
-Initially, the only supported STT engine is Gladia through the official  [LiveKit Gladia Plugin](https://docs.livekit.io/agents/integrations/stt/gladia/).
+Supported STT engines:
 
-It'll be expanded in the future to support other STT plugins from the LiveKit Agents
-ecosystem.
+- **Gladia** — via the official [LiveKit Gladia plugin](https://docs.livekit.io/agents/integrations/stt/gladia/) (default)
+- **OpenAI** — via the [LiveKit OpenAI plugin](https://docs.livekit.io/agents/models/stt/openai/); supports the official OpenAI API and any OpenAI-compatible endpoint
 
 ## Getting Started
 
@@ -14,7 +14,7 @@ ecosystem.
 
 - Python 3.10+
 - A LiveKit instance
-- A Gladia API key
+- A Gladia API key **or** an OpenAI API key (depending on your chosen STT provider)
 - uv:
   - See installation instructions: https://docs.astral.sh/uv/getting-started/installation/
 
@@ -48,13 +48,17 @@ ecosystem.
     LIVEKIT_API_KEY=...
     LIVEKIT_API_SECRET=...
 
-    # Gladia API Key
+    # For Gladia (default provider):
     GLADIA_API_KEY=...
+
+    # For OpenAI (set STT_PROVIDER=openai):
+    # STT_PROVIDER=openai
+    # OPENAI_API_KEY=...
     ```
 
     Feel free to check `.env.example` for any other configurations of interest.
 
-    **All options ingested by the Gladia STT plugin are exposed via env vars**.
+    **All options ingested by the Gladia and OpenAI STT plugins are exposed via env vars**.
 
 ### Running
 
@@ -98,6 +102,30 @@ docker run --network host --rm -it --env-file .env bbb-livekit-stt
 
 Pre-built images are available via GitHub Container Registry as well.
 
+### OpenAI STT provider
+
+Set `STT_PROVIDER=openai` to use OpenAI STT instead of Gladia.
+
+**Official OpenAI API:**
+
+```bash
+STT_PROVIDER=openai
+OPENAI_API_KEY=your-key
+# OPENAI_STT_MODEL=gpt-4o-transcribe  # default; use "whisper-1" for classic Whisper
+```
+
+**OpenAI-compatible endpoint** (e.g. a self-hosted Whisper server):
+
+```bash
+STT_PROVIDER=openai
+OPENAI_API_KEY=any-value
+OPENAI_BASE_URL=http://your-server:8000
+OPENAI_STT_MODEL=your-model-name
+```
+
+> **Note**: OpenAI STT does not support real-time translation. Only the original
+> transcript language is returned, matching the user's BBB speech locale.
+
 ### Development
 
 #### Testing
@@ -114,10 +142,18 @@ Run with coverage:
 uv run pytest tests/ --ignore=tests/integration --cov --cov-report=term-missing
 ```
 
-Integration tests require a real Gladia API key and make live requests to the Gladia service. Set `GLADIA_API_KEY` and run:
+Integration tests require a real API key and make live requests to the STT service.
+
+For Gladia, set `GLADIA_API_KEY` and run:
 
 ```bash
 GLADIA_API_KEY=your-key uv run pytest tests/integration -m integration
+```
+
+For OpenAI, set `OPENAI_API_KEY` and run:
+
+```bash
+OPENAI_API_KEY=your-key uv run pytest tests/integration -m integration
 ```
 
 #### Linting

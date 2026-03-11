@@ -49,7 +49,7 @@ async def entrypoint(ctx: JobContext):
             meeting_id = routing.get("meetingId")
             user_id = routing.get("userId")
 
-            if meeting_id != agent.room.name:
+            if agent.room is None or meeting_id != agent.room.name:
                 return
 
             if event_name == RedisManager.USER_SPEECH_LOCALE_CHANGED_EVT_MSG:
@@ -102,7 +102,8 @@ async def entrypoint(ctx: JobContext):
         original_lang = original_locale.split("-")[0]
 
         for alternative in event.alternatives:
-            transcript_lang = alternative.language
+            # Some providers (e.g. OpenAI) may not report a language; fall back to original.
+            transcript_lang = alternative.language or original_lang
             text = alternative.text
             bbb_locale = None
             start_time_adjusted = math.floor(open_time + alternative.start_time)
@@ -171,7 +172,8 @@ async def entrypoint(ctx: JobContext):
         min_utterance_length = p_settings.get("min_utterance_length", 0)
 
         for alternative in event.alternatives:
-            transcript_lang = alternative.language
+            # Some providers (e.g. OpenAI) may not report a language; fall back to original.
+            transcript_lang = alternative.language or original_lang
             text = alternative.text
             start_time_adjusted = math.floor(open_time + alternative.start_time)
             end_time_adjusted = math.floor(open_time + alternative.end_time)

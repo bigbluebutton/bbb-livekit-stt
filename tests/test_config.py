@@ -11,6 +11,7 @@ from config import (
     redact_config_values,
 )
 from providers.gladia import GladiaConfig
+from providers.openai import OpenAiConfig
 
 
 class TestGetBoolEnv:
@@ -223,3 +224,33 @@ class TestGladiaConfigDefaults:
         config = GladiaConfig()
         assert config.min_confidence_interim == pytest.approx(0.2)
         assert config.min_confidence_final == pytest.approx(0.5)
+
+
+class TestOpenAiConfigDefaults:
+    @pytest.fixture(autouse=True)
+    def _clean_openai_env(self, monkeypatch):
+        """Remove all OPENAI_* env vars so dataclass defaults are exercised."""
+        for key in list(os.environ):
+            if key.startswith("OPENAI_"):
+                monkeypatch.delenv(key, raising=False)
+
+    def test_model_defaults_to_gpt4o_transcribe(self):
+        assert OpenAiConfig().model == "gpt-4o-transcribe"
+
+    def test_api_key_defaults_to_none(self):
+        assert OpenAiConfig().api_key is None
+
+    def test_base_url_defaults_to_none(self):
+        assert OpenAiConfig().base_url is None
+
+    def test_model_overridden_by_env_var(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_STT_MODEL", "whisper-1")
+        assert OpenAiConfig().model == "whisper-1"
+
+    def test_base_url_overridden_by_env_var(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://localhost:8000")
+        assert OpenAiConfig().base_url == "http://localhost:8000"
+
+    def test_api_key_overridden_by_env_var(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        assert OpenAiConfig().api_key == "sk-test"
