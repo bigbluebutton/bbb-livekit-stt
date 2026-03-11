@@ -244,17 +244,24 @@ class OpenAiSttAgent(EventEmitter):
         buffer_duration = 0.0
         silence_duration = 0.0
         was_speaking = False
+        speech_start_time = 0.0
 
-        async def flush_segment(frames: list[rtc.AudioFrame]) -> None:
+        async def flush_segment(frames: list[rtc.AudioFrame], seg_start: float) -> None:
             if not frames:
                 return
             try:
                 wav_bytes = rtc.combine_audio_frames(frames).to_wav_bytes()
                 text = await self._transcribe_wav(wav_bytes, language)
                 if text:
+                    seg_end = time.time() - self.open_time
                     event = stt.SpeechEvent(
                         type=stt.SpeechEventType.FINAL_TRANSCRIPT,
-                        alternatives=[stt.SpeechData(text=text, language=language)],
+                        alternatives=[stt.SpeechData(
+                            text=text,
+                            language=language,
+                            start_time=seg_start,
+                            end_time=seg_end,
+                        )],
                     )
                     self.emit(
                         "final_transcript",
@@ -278,6 +285,8 @@ class OpenAiSttAgent(EventEmitter):
                 frame_duration = frame.samples_per_channel / frame.sample_rate
 
                 if is_speaking:
+                    if not was_speaking:
+                        speech_start_time = time.time() - self.open_time
                     speech_buffer.append(frame)
                     buffer_duration += frame_duration
                     silence_duration = 0.0
@@ -292,21 +301,21 @@ class OpenAiSttAgent(EventEmitter):
                         silence_duration >= _SILENCE_DURATION_S
                         or buffer_duration >= _MAX_BUFFER_DURATION_S
                     ):
-                        await flush_segment(speech_buffer[:])
+                        await flush_segment(speech_buffer[:], speech_start_time)
                         speech_buffer.clear()
                         buffer_duration = 0.0
                         silence_duration = 0.0
                         was_speaking = False
                 elif buffer_duration >= _MAX_BUFFER_DURATION_S:
                     # Safety flush even without trailing silence.
-                    await flush_segment(speech_buffer[:])
+                    await flush_segment(speech_buffer[:], speech_start_time)
                     speech_buffer.clear()
                     buffer_duration = 0.0
                     silence_duration = 0.0
                     was_speaking = False
 
             # Flush any remaining buffered speech at end of stream.
-            await flush_segment(speech_buffer[:])
+            await flush_segment(speech_buffer[:], speech_start_time)
 
         except asyncio.CancelledError:
             logging.info(f"Transcription for {participant.identity} was cancelled.")
