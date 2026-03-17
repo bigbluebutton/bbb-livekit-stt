@@ -17,7 +17,7 @@ _SILENCE_THRESHOLD_RMS = 500
 # Seconds of continuous silence after speech before the segment is flushed.
 _SILENCE_DURATION_S = 0.8
 # Maximum segment duration before a forced flush (prevents unbounded buffering).
-_MAX_BUFFER_DURATION_S = 30.0
+_MAX_BUFFER_DURATION_S = 12.0
 
 
 @dataclass
@@ -152,7 +152,8 @@ class OpenAiSttAgent(BaseSttAgent):
         backends that implement the OpenAI Realtime API.
         """
         audio_stream = rtc.AudioStream(track)
-        self.open_time = time.time()
+        open_time = time.time()
+        self.open_time = open_time
 
         speech_buffer: list[rtc.AudioFrame] = []
         buffer_duration = 0.0
@@ -167,7 +168,7 @@ class OpenAiSttAgent(BaseSttAgent):
                 wav_bytes = rtc.combine_audio_frames(frames).to_wav_bytes()
                 text = await self._transcribe_wav(wav_bytes, language)
                 if text:
-                    seg_end = time.time() - self.open_time
+                    seg_end = time.time() - open_time
                     event = stt.SpeechEvent(
                         type=stt.SpeechEventType.FINAL_TRANSCRIPT,
                         alternatives=[
@@ -183,7 +184,7 @@ class OpenAiSttAgent(BaseSttAgent):
                         "final_transcript",
                         participant=participant,
                         event=event,
-                        open_time=self.open_time,
+                        open_time=open_time,
                     )
             except asyncio.CancelledError:
                 raise
@@ -202,11 +203,19 @@ class OpenAiSttAgent(BaseSttAgent):
 
                 if is_speaking:
                     if not was_speaking:
-                        speech_start_time = time.time() - self.open_time
+                        speech_start_time = time.time() - open_time
                     speech_buffer.append(frame)
                     buffer_duration += frame_duration
                     silence_duration = 0.0
                     was_speaking = True
+
+                    if buffer_duration >= _MAX_BUFFER_DURATION_S:
+                        # Safety flush: prevent unbounded buffer growth during
+                        # continuous speech or sustained noise above the RMS threshold.
+                        await flush_segment(speech_buffer[:], speech_start_time)
+                        speech_buffer.clear()
+                        buffer_duration = 0.0
+                        speech_start_time = time.time() - open_time
                 elif was_speaking:
                     # Carry silence frames so the segment has natural trailing audio.
                     speech_buffer.append(frame)
@@ -222,13 +231,6 @@ class OpenAiSttAgent(BaseSttAgent):
                         buffer_duration = 0.0
                         silence_duration = 0.0
                         was_speaking = False
-                elif buffer_duration >= _MAX_BUFFER_DURATION_S:
-                    # Safety flush even without trailing silence.
-                    await flush_segment(speech_buffer[:], speech_start_time)
-                    speech_buffer.clear()
-                    buffer_duration = 0.0
-                    silence_duration = 0.0
-                    was_speaking = False
 
             # Flush any remaining buffered speech at end of stream.
             await flush_segment(speech_buffer[:], speech_start_time)
@@ -239,3 +241,4 @@ class OpenAiSttAgent(BaseSttAgent):
             logging.error(f"Error during transcription for track {track.sid}: {e}")
         finally:
             self.processing_info.pop(participant.identity, None)
+            await audio_stream.aclose()
