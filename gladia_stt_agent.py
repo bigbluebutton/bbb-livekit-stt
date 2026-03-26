@@ -77,7 +77,7 @@ class GladiaSttAgent(EventEmitter):
             return
 
         gladia_locale = self._sanitize_locale(locale)
-        stt_stream = self.stt.stream(language=gladia_locale)
+        stt_stream = self.stt.stream(language=gladia_locale) if gladia_locale else self.stt.stream()
         task = asyncio.create_task(
             self._run_transcription_pipeline(participant, track, stt_stream)
         )
@@ -105,7 +105,10 @@ class GladiaSttAgent(EventEmitter):
             logging.info(f"Updating locale to '{locale}' for user {user_id}.")
             stream = self.processing_info[user_id]["stream"]
             gladia_locale = self._sanitize_locale(locale)
-            stream.update_options(languages=[gladia_locale])
+            if gladia_locale:
+                stream.update_options(languages=[gladia_locale])
+            else:
+                stream.update_options(languages=[])
         else:
             logging.warning(
                 f"Won't update locale, no active transcription for user {user_id}."
@@ -169,10 +172,15 @@ class GladiaSttAgent(EventEmitter):
                 return pub.track
         return None
 
-    def _sanitize_locale(self, locale: str) -> str:
+    def _sanitize_locale(self, locale: str) -> str | None:
         # Gladia only accepts ISO 639-1 locales (e.g. "en")
         # BBB uses <ISO 639-1>-<ISO 3166-1> format (e.g. "en-US")
         # Sanitization here is to ensure we use Gladia's format.
+        # "auto" is not a valid ISO language code — returning None omits the
+        # language parameter so Gladia falls back to server-side auto-detection.
+        if locale.lower() == "auto":
+            return None
+
         gladia_locale = locale.split("-")[0].lower()
 
         return gladia_locale

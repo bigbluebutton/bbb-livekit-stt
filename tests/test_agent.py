@@ -68,6 +68,12 @@ class TestSanitizeLocale:
         assert agent._sanitize_locale("EN-US") == "en"
         assert agent._sanitize_locale("PT") == "pt"
 
+    def test_returns_none_for_auto(self):
+        agent = _make_agent()
+        assert agent._sanitize_locale("auto") is None
+        assert agent._sanitize_locale("Auto") is None
+        assert agent._sanitize_locale("AUTO") is None
+
 
 class TestStopTranscriptionForUser:
     def test_cancels_task_and_removes_from_processing_info(self):
@@ -104,6 +110,17 @@ class TestUpdateLocaleForUser:
         agent.update_locale_for_user("user_1", "de")
 
         mock_stream.update_options.assert_called_once_with(languages=["de"])
+
+    def test_sends_empty_languages_for_auto_locale(self):
+        """'auto' locale should send empty languages list to trigger Gladia auto-detection."""
+        agent = _make_agent()
+        agent.participant_settings["user_1"] = {"locale": "en", "provider": "gladia"}
+        mock_stream = MagicMock()
+        agent.processing_info["user_1"] = {"stream": mock_stream, "task": MagicMock()}
+
+        agent.update_locale_for_user("user_1", "auto")
+
+        mock_stream.update_options.assert_called_once_with(languages=[])
 
     def test_sanitizes_bcp47_locale_for_stream_update(self):
         """update_locale_for_user should sanitize 'de-DE' → 'de' for the stream."""
@@ -286,6 +303,21 @@ class TestStartTranscriptionForUser:
             agent.stt.stream.assert_called_once_with(language="pt")
 
             # Cancel the background task to avoid leaking past the patch
+            agent.processing_info["user_1"]["task"].cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await agent.processing_info["user_1"]["task"]
+
+    async def test_omits_language_param_for_auto_locale(self):
+        """Locale 'auto' should call stream() with no language param for Gladia auto-detection."""
+        mock_track = MagicMock()
+        mock_track.kind = rtc.TrackKind.KIND_AUDIO
+        participant = _make_participant("user_1", audio_track=mock_track)
+        agent = _make_agent_with_room(participants={"pid": participant})
+
+        with patch("gladia_stt_agent.rtc.AudioStream"):
+            agent.start_transcription_for_user("user_1", "auto", "gladia")
+            agent.stt.stream.assert_called_once_with()
+
             agent.processing_info["user_1"]["task"].cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await agent.processing_info["user_1"]["task"]
