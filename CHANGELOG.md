@@ -12,6 +12,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 * feat(tests): add tests for v0.2.0 changes (utils coercions, config redaction, on_track_subscribed fix, new defaults)
 * build: add GitHub Actions workflow for running tests
 * fix: handle "auto" locale to prevent invalid language code sent to Gladia
+
 ## v0.2.0
 
 * feat(stt): support INTERIM transcriptions

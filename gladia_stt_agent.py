@@ -182,10 +182,9 @@ class GladiaSttAgent(EventEmitter):
         # Sanitization here is to ensure we use Gladia's format.
         # "auto" is not a valid ISO language code — returning None omits the
         # language parameter so Gladia falls back to server-side auto-detection.
-        if locale.lower() == "auto":
-            return None
-
         gladia_locale = locale.split("-")[0].lower()
+        if gladia_locale == "auto":
+            return None
 
         return gladia_locale
 

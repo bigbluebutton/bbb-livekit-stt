@@ -74,6 +74,13 @@ class TestSanitizeLocale:
         assert agent._sanitize_locale("Auto") is None
         assert agent._sanitize_locale("AUTO") is None
 
+    def test_returns_none_for_auto_with_region_suffix(self):
+        # Defensive: BBB doesn't currently emit this, but the check must run on
+        # the post-split token so "auto-XX" can't slip through to Gladia.
+        agent = _make_agent()
+        assert agent._sanitize_locale("auto-XX") is None
+        assert agent._sanitize_locale("AUTO-FOO") is None
+
 
 class TestStopTranscriptionForUser:
     def test_cancels_task_and_removes_from_processing_info(self):
