@@ -77,7 +77,11 @@ class GladiaSttAgent(EventEmitter):
             return
 
         gladia_locale = self._sanitize_locale(locale)
-        stt_stream = self.stt.stream(language=gladia_locale) if gladia_locale else self.stt.stream()
+        stt_stream = (
+            self.stt.stream(language=gladia_locale)
+            if gladia_locale
+            else self.stt.stream()
+        )
         task = asyncio.create_task(
             self._run_transcription_pipeline(participant, track, stt_stream)
         )
