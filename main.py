@@ -104,7 +104,10 @@ async def entrypoint(ctx: JobContext):
             )
             return
 
-        original_lang = original_locale.split("-")[0]
+        # When locale is "auto", Gladia auto-detects — use the detected
+        # language from the transcript to resolve the BBB locale via the map.
+        is_auto = original_locale.lower() == "auto"
+        original_lang = None if is_auto else original_locale.split("-")[0]
 
         for alternative in event.alternatives:
             if _is_below_min_confidence(
@@ -138,7 +141,7 @@ async def entrypoint(ctx: JobContext):
                     "alternative": alternative,
                 },
             )
-            if transcript_lang == original_lang:
+            if not is_auto and transcript_lang == original_lang:
                 # This is the original transcript, use the original BBB locale
                 bbb_locale = original_locale
             else:
@@ -181,7 +184,8 @@ async def entrypoint(ctx: JobContext):
             )
             return
 
-        original_lang = original_locale.split("-")[0]
+        is_auto = original_locale.lower() == "auto"
+        original_lang = None if is_auto else original_locale.split("-")[0]
         min_utterance_length = p_settings.get("min_utterance_length", 0)
 
         for alternative in event.alternatives:
@@ -238,7 +242,7 @@ async def entrypoint(ctx: JobContext):
                 },
             )
 
-            if transcript_lang == original_lang:
+            if not is_auto and transcript_lang == original_lang:
                 bbb_locale = original_locale
             else:
                 bbb_locale = gladia_config.translation_lang_map.get(transcript_lang)
