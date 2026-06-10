@@ -14,19 +14,26 @@ import json
 import logging
 import os
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 import aiohttp
 import numpy as np
 from livekit import rtc
 from livekit.agents import stt
+from livekit.agents import vad as agents_vad
+from livekit.plugins import silero
 
 from providers.base import BaseSttAgent, BaseSttConfig
 
-_SILENCE_THRESHOLD_RMS = float(os.getenv("VOXTRAL_SILENCE_THRESHOLD_RMS", "500"))
-_SILENCE_DURATION_S = float(os.getenv("VOXTRAL_SILENCE_DURATION_S", "0.6"))
 _MAX_BUFFER_DURATION_S = float(os.getenv("VOXTRAL_MAX_BUFFER_DURATION_S", "8.0"))
 _TARGET_SAMPLE_RATE = int(os.getenv("VOXTRAL_TARGET_SAMPLE_RATE", "16000"))
+# Silero VAD parameters — replace the old RMS threshold and silence duration
+_VAD_MIN_SILENCE_S = float(os.getenv("VOXTRAL_VAD_MIN_SILENCE_S", "0.6"))
+_VAD_ACTIVATION_THRESHOLD = float(os.getenv("VOXTRAL_VAD_ACTIVATION_THRESHOLD", "0.5"))
+# Rolling pre-roll kept while idle so the word onset preceding Silero's
+# START_OF_SPEECH (its prefix padding) is sent once a streaming request opens.
+_VAD_PREROLL_S = float(os.getenv("VOXTRAL_VAD_PREROLL_S", "0.5"))
 
 
 @dataclass
@@ -51,9 +58,17 @@ voxtral_realtime_config = VoxtralRealtimeConfig()
 
 
 class VoxtralRealtimeSttAgent(BaseSttAgent):
-    def __init__(self, config: VoxtralRealtimeConfig):
+    def __init__(
+        self,
+        config: VoxtralRealtimeConfig,
+        vad: agents_vad.VAD | None = None,
+    ):
         super().__init__(config)
         self._http_session: aiohttp.ClientSession | None = None
+        self._vad: agents_vad.VAD = vad or silero.VAD.load(
+            min_silence_duration=_VAD_MIN_SILENCE_S,
+            activation_threshold=_VAD_ACTIVATION_THRESHOLD,
+        )
 
     def _get_http_session(self) -> aiohttp.ClientSession:
         if self._http_session is None:
@@ -200,9 +215,14 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
             _TARGET_SAMPLE_RATE // 20 * 2
         )  # 50 ms of int16 (matches official plugin)
 
-        # Shared between _writer and _reader.  asyncio is single-threaded so no
-        # lock is needed; the writer sets this synchronously before any await.
-        speech_start_time = 0.0  # set by writer when speech starts
+        # Per-segment start times, pushed by _writer._open() and popped by
+        # _reader at each segment's first delta. The server processes segments
+        # strictly in order on one connection, so FIFO pairing is exact. This
+        # gives every segment a distinct start_time — and therefore a distinct
+        # BBB transcriptId — including max-buffer splits of one long utterance,
+        # where Silero fires no new START_OF_SPEECH (a shared "speech start"
+        # variable would collide and make segment 2 overwrite segment 1).
+        segment_starts: deque[float] = deque()
 
         # ── Reader ────────────────────────────────────────────────────────────
 
@@ -214,10 +234,6 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
             in real time rather than buffered and replayed after each commit.
             """
             text = ""
-            # Snapshot speech_start_time at the first delta of each utterance.
-            # The writer may update speech_start_time for the next utterance
-            # before this utterance's transcription.done arrives; snapshotting
-            # here keeps all events for this utterance on the same transcriptId.
             utterance_start: float | None = None
 
             while True:
@@ -261,7 +277,12 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
 
                 if msg_type == "transcription.delta":
                     if utterance_start is None:
-                        utterance_start = speech_start_time
+                        # Pair this segment with the start time its opener pushed.
+                        utterance_start = (
+                            segment_starts.popleft()
+                            if segment_starts
+                            else time.time() - open_time
+                        )
                         logging.debug(
                             f"Voxtral: first delta for {participant.identity} "
                             f"at t={time.time() - open_time:.3f}s "
@@ -298,6 +319,15 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                     if server_text:
                         text = server_text
 
+                    if utterance_start is None:
+                        # Zero-delta segment: consume its queued start anyway so
+                        # later segments stay paired with their own openers.
+                        utterance_start = (
+                            segment_starts.popleft()
+                            if segment_starts
+                            else time.time() - open_time
+                        )
+
                     if text:
                         self.emit(
                             "final_transcript",
@@ -308,7 +338,7 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                                     stt.SpeechData(
                                         text=text,
                                         language=language,
-                                        start_time=utterance_start or speech_start_time,
+                                        start_time=utterance_start,
                                         end_time=time.time() - open_time,
                                     )
                                 ],
@@ -324,29 +354,69 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                     logging.error(f"Voxtral WS error event: {data}")
                     break
 
-        # ── Writer (RMS speech detection, server-side streaming) ─────────────
+        # ── VAD task + Writer (Silero VAD, server-side streaming) ────────────
         #
         # Protocol (verified empirically against vLLM Voxtral, see
         # notes/progressive-transcription-investigation.md):
-        #   1. On speech start: send an OPENING commit to start a streaming
-        #      transcription request. Without this the server only buffers and
-        #      batch-transcribes on the closing commit (no live deltas).
-        #   2. During speech: append audio in real time. The server streams
-        #      transcription.delta events back as audio arrives (first delta
-        #      ~0.6s after speech start), which _reader emits as INTERIM.
-        #   3. On silence (or max-buffer): send closing commit + commit(final)
-        #      to end the request. The server emits transcription.done, which
+        #   1. On speech start (Silero START_OF_SPEECH): send an OPENING commit
+        #      to start a streaming request. Without this the server only buffers
+        #      and batch-transcribes on the closing commit (no live deltas).
+        #   2. While a request is open, audio is appended in real time. The
+        #      server streams transcription.delta events back as audio arrives
+        #      (first delta ~0.6 s after speech start), which _reader emits as
+        #      INTERIM. While idle, only a bounded pre-roll is kept locally.
+        #   3. On speech end (Silero END_OF_SPEECH or max-buffer): send closing
+        #      commit + commit(final). The server emits transcription.done, which
         #      _reader emits as FINAL.
-        # Each utterance is its own streaming request with its own
-        # speech_start_time, so consecutive utterances never collide on BBB's
-        # second-granularity transcriptId.
+        # Each segment is its own streaming request with its own entry in
+        # segment_starts, so consecutive segments — including max-buffer splits
+        # of one long utterance — never collide on BBB's second-granularity
+        # transcriptId.
+        #
+        # Silero VAD only controls WHEN commits are sent; audio filtering is not
+        # needed and was the root cause of our earlier failed attempt.
+
+        # Shared between _vad_task and _writer (asyncio single-threaded, no locks)
+        is_in_speech = False
+        commit_event = asyncio.Event()  # set by _vad_task on END_OF_SPEECH
+
+        vad_stream = self._vad.stream()
+
+        async def _vad_task() -> None:
+            nonlocal is_in_speech
+            try:
+                async for ev in vad_stream:
+                    if ev.type == agents_vad.VADEventType.START_OF_SPEECH:
+                        is_in_speech = True
+                        logging.debug(
+                            f"Voxtral: speech start for {participant.identity}"
+                        )
+                    elif ev.type == agents_vad.VADEventType.END_OF_SPEECH:
+                        is_in_speech = False
+                        commit_event.set()
+                        logging.debug(
+                            f"Voxtral: speech end for {participant.identity}"
+                        )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # A dead VAD task would silently freeze is_in_speech and stop all
+                # commits; surface it rather than degrade to max-buffer-only.
+                logging.error(
+                    f"Voxtral: VAD task failed for {participant.identity}: {e}",
+                    exc_info=True,
+                )
 
         async def _writer() -> None:
-            nonlocal speech_start_time
-            send_buffer_bytes = b""
-            buffer_duration = 0.0
-            silence_duration = 0.0
-            was_speaking = False
+            # `stream_open` is owned exclusively by _writer; `is_in_speech` is
+            # owned exclusively by _vad_task. Keeping them separate is what lets a
+            # max-buffer split mid-utterance reopen immediately on the next frame
+            # (we never clobber the VAD's view of whether speech is ongoing).
+            preroll_max = int(_VAD_PREROLL_S * _TARGET_SAMPLE_RATE) * 2  # int16 bytes
+            preroll = bytearray()  # recent audio captured while no request is open
+            pending = b""  # audio buffered for chunked append while open
+            open_secs = 0.0  # duration of the current open segment
+            stream_open = False
 
             async def _append(data: bytes) -> None:
                 await ws.send_json(
@@ -356,84 +426,91 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                     }
                 )
 
-            async def _open_stream() -> None:
-                """Send the opening commit that starts a streaming request."""
-                await ws.send_json({"type": "input_audio_buffer.commit"})
+            async def _flush_pending() -> None:
+                nonlocal pending
+                while len(pending) >= chunk_size:
+                    await _append(pending[:chunk_size])
+                    pending = pending[chunk_size:]
 
-            async def _close_stream(tail_bytes: bytes) -> None:
+            async def _open() -> None:
+                """Open a streaming request and replay the captured lead-in."""
+                nonlocal stream_open, pending, open_secs
+                commit_event.clear()  # discard any stale END from a prior segment
+                # Record this segment's start (backdated by the replayed pre-roll)
+                # for the reader to pair with the segment's transcription events.
+                preroll_secs = len(preroll) / (_TARGET_SAMPLE_RATE * 2)
+                segment_starts.append(time.time() - open_time - preroll_secs)
+                await ws.send_json({"type": "input_audio_buffer.commit"})
+                stream_open = True
+                open_secs = 0.0
+                if preroll:
+                    pending += bytes(preroll)
+                    preroll.clear()
+                    await _flush_pending()
+
+            async def _close() -> None:
                 """Flush remaining audio and close the utterance's request."""
-                if tail_bytes:
-                    await _append(tail_bytes)
+                nonlocal stream_open, pending
+                if pending:
+                    await _append(pending)
+                    pending = b""
                 await ws.send_json({"type": "input_audio_buffer.commit"})
                 await ws.send_json({"type": "input_audio_buffer.commit", "final": True})
+                stream_open = False
+                preroll.clear()  # committed; pre-roll only seeds the next onset
 
             async for audio_event in audio_stream:
                 frame = audio_event.frame
-                samples = np.frombuffer(frame.data, dtype=np.int16)
-                rms = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
-                is_speaking = rms > _SILENCE_THRESHOLD_RMS
                 frame_duration = frame.samples_per_channel / frame.sample_rate
 
-                if is_speaking:
-                    if not was_speaking:
-                        # New utterance: open a streaming request before any audio.
-                        speech_start_time = time.time() - open_time
-                        await _open_stream()
-                    was_speaking = True
-                    silence_duration = 0.0
+                # Feed the VAD, then yield once so _vad_task is scheduled. In
+                # production the network awaits below also yield; this keeps the
+                # interleave deterministic and lets tests drive a sync frame
+                # iterator without starving the VAD task.
+                vad_stream.push_frame(frame)
+                await asyncio.sleep(0)
 
-                    send_buffer_bytes += _to_pcm16_16k(frame)
-                    buffer_duration += frame_duration
+                resampled = _to_pcm16_16k(frame)
 
-                    while len(send_buffer_bytes) >= chunk_size:
-                        await _append(send_buffer_bytes[:chunk_size])
-                        send_buffer_bytes = send_buffer_bytes[chunk_size:]
+                # Open a request as soon as the VAD reports speech.
+                if is_in_speech and not stream_open:
+                    await _open()
 
-                    if buffer_duration >= _MAX_BUFFER_DURATION_S:
-                        # Safety cap: close this utterance; the next speech frame
-                        # reopens a fresh request with a new speech_start_time.
-                        await _close_stream(send_buffer_bytes)
-                        send_buffer_bytes = b""
-                        buffer_duration = 0.0
-                        silence_duration = 0.0
-                        was_speaking = False
+                if stream_open:
+                    pending += resampled
+                    open_secs += frame_duration
+                    await _flush_pending()
+                else:
+                    # Idle: keep only a bounded rolling pre-roll; send nothing.
+                    preroll += resampled
+                    if len(preroll) > preroll_max:
+                        del preroll[:-preroll_max]
 
-                elif was_speaking:
-                    # Trailing audio after speech, before silence threshold met.
-                    send_buffer_bytes += _to_pcm16_16k(frame)
-                    buffer_duration += frame_duration
-                    silence_duration += frame_duration
+                # Close on end-of-speech (Silero) or the max-buffer safety cap.
+                # is_in_speech is deliberately left untouched: if the speaker is
+                # still talking past the cap, the next frame reopens immediately.
+                if stream_open and (
+                    commit_event.is_set() or open_secs >= _MAX_BUFFER_DURATION_S
+                ):
+                    commit_event.clear()
+                    await _close()
 
-                    while len(send_buffer_bytes) >= chunk_size:
-                        await _append(send_buffer_bytes[:chunk_size])
-                        send_buffer_bytes = send_buffer_bytes[chunk_size:]
+            # End of stream: flush any open request.
+            if stream_open:
+                await _close()
+            vad_stream.end_input()
 
-                    if silence_duration >= _SILENCE_DURATION_S:
-                        await _close_stream(send_buffer_bytes)
-                        send_buffer_bytes = b""
-                        buffer_duration = 0.0
-                        silence_duration = 0.0
-                        was_speaking = False
-
-            if was_speaking:
-                await _close_stream(send_buffer_bytes)
-
-        # ── Run reader and writer concurrently ────────────────────────────────
+        # ── Run all three tasks concurrently ──────────────────────────────────
 
         reader_task = asyncio.create_task(_reader())
+        vad_task = asyncio.create_task(_vad_task())
         try:
             await _writer()
         finally:
             reader_task.cancel()
-            try:
-                await reader_task
-            except asyncio.CancelledError:
-                pass
-            except Exception as e:
-                logging.error(
-                    f"Voxtral: reader task crashed for {participant.identity}: {e}",
-                    exc_info=True,
-                )
+            vad_task.cancel()
+            await asyncio.gather(reader_task, vad_task, return_exceptions=True)
+            await vad_stream.aclose()
 
 
 def _to_pcm16_16k(frame: rtc.AudioFrame) -> bytes:

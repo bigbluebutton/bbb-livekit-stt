@@ -8,10 +8,11 @@ import pytest
 from livekit import rtc
 from livekit.agents import stt
 
+from livekit.agents import vad as agents_vad
+
 from providers.voxtral_realtime import (
     VoxtralRealtimeConfig,
     VoxtralRealtimeSttAgent,
-    _SILENCE_THRESHOLD_RMS,
     _to_pcm16_16k,
 )
 
@@ -19,12 +20,27 @@ from providers.voxtral_realtime import (
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
+def _make_mock_vad(vad_events=None):
+    """Return a mock VAD that emits the given VADEvent sequence."""
+    mock_vad = MagicMock()
+    # AsyncMock with __aiter__.return_value is the correct pattern for async-for
+    # (same as AudioStream mocking in other test files).
+    mock_vad_stream = AsyncMock()
+    mock_vad_stream.push_frame = MagicMock()
+    mock_vad_stream.end_input = MagicMock()
+    mock_vad_stream.aclose = AsyncMock()
+    events = vad_events or []
+    mock_vad_stream.__aiter__.return_value = iter(events)
+    mock_vad.stream.return_value = mock_vad_stream
+    return mock_vad
+
+
 def _make_config(**kwargs):
     return VoxtralRealtimeConfig(api_key="test-key", **kwargs)
 
 
-def _make_agent(**kwargs):
-    return VoxtralRealtimeSttAgent(_make_config(**kwargs))
+def _make_agent(vad_events=None, **kwargs):
+    return VoxtralRealtimeSttAgent(_make_config(**kwargs), vad=_make_mock_vad(vad_events))
 
 
 def _make_participant(identity, has_audio_track=True):
@@ -73,7 +89,8 @@ def _make_audio_frame(
 
 
 def _make_loud_frame():
-    return _make_audio_frame(amplitude=int(_SILENCE_THRESHOLD_RMS * 2))
+    # Amplitude value is irrelevant; speech detection is now Silero-based (mocked in tests)
+    return _make_audio_frame(amplitude=1000)
 
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -331,14 +348,27 @@ class TestRunTranscriptionPipeline:
 # ── _vad_loop — speech detection and final flush ──────────────────────────────
 
 
+def _make_vad_event(event_type: agents_vad.VADEventType) -> MagicMock:
+    ev = MagicMock()
+    ev.type = event_type
+    return ev
+
+
 class TestVadLoop:
-    def _full_pipeline_setup(self, audio_frames, ws_messages):
+    def _full_pipeline_setup(self, audio_frames, ws_messages, vad_events=None):
         """
-        Return (agent, participant, mock_stream, mock_session) wired up so that
+        Return (agent, participant, mock_stream) wired up so that
         _run_transcription_pipeline can run end-to-end through the VAD loop.
         ws_messages is a list appended after the mandatory session.created message.
+        vad_events: Silero VAD events emitted by the mock; defaults to
+          [START_OF_SPEECH, END_OF_SPEECH] so a commit fires.
         """
-        agent = _make_agent(interim_results=True)
+        if vad_events is None:
+            vad_events = [
+                _make_vad_event(agents_vad.VADEventType.START_OF_SPEECH),
+                _make_vad_event(agents_vad.VADEventType.END_OF_SPEECH),
+            ]
+        agent = _make_agent(interim_results=True, vad_events=vad_events)
         participant = MagicMock(spec=rtc.RemoteParticipant)
         participant.identity = "user_vad"
 
@@ -369,11 +399,12 @@ class TestVadLoop:
         return agent, participant, mock_stream
 
     async def test_silent_frames_do_not_trigger_flush(self):
-        """Only silence frames — no flush, no transcript event."""
+        """No VAD events — no commit fires, no transcript event."""
         silence = _make_audio_frame(amplitude=0)
         agent, participant, mock_stream = self._full_pipeline_setup(
             audio_frames=[silence],
             ws_messages=[],
+            vad_events=[],  # Silero never fires → no commit → no transcript
         )
 
         emitted = []
@@ -507,4 +538,187 @@ class TestVadLoop:
         start_times.add(final[0]["event"].alternatives[0].start_time)
         assert len(start_times) == 1, (
             f"all events for one utterance must share start_time, got {start_times}"
+        )
+
+    async def test_max_buffer_split_reopens_stream(self, monkeypatch):
+        """
+        Regression for the is_in_speech / stream_open dual-ownership bug: a
+        continuous utterance that exceeds the max-buffer cap (speaker never
+        pauses, so Silero emits START but no END) must REOPEN a fresh streaming
+        request after each forced close — otherwise the rest of the utterance is
+        appended with no opening commit and the server silently stops streaming.
+        """
+        import providers.voxtral_realtime as vr
+
+        # Trip the safety cap after ~2 frames (each _make_audio_frame is 0.01 s).
+        monkeypatch.setattr(vr, "_MAX_BUFFER_DURATION_S", 0.015)
+
+        agent = _make_agent(
+            interim_results=True,
+            # START only, no END → speaker stays "in speech" the whole time.
+            vad_events=[_make_vad_event(agents_vad.VADEventType.START_OF_SPEECH)],
+        )
+        participant = MagicMock(spec=rtc.RemoteParticipant)
+        participant.identity = "user_split"
+
+        sent: list[dict] = []
+
+        async def _send_json(data):
+            sent.append(data)
+            await asyncio.sleep(0)
+
+        mock_ws = AsyncMock()
+        mock_ws.receive = AsyncMock(
+            side_effect=[_text_ws_msg({"type": "session.created"})]
+        )
+        mock_ws.send_json = _send_json
+        cm = AsyncMock()
+        cm.__aenter__ = AsyncMock(return_value=mock_ws)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        mock_session = MagicMock()
+        mock_session.ws_connect = MagicMock(return_value=cm)
+        agent._http_session = mock_session
+
+        frames = [_make_loud_frame() for _ in range(6)]
+        audio_events = [MagicMock(frame=f) for f in frames]
+        mock_stream = AsyncMock()
+        mock_stream.__aiter__.return_value = iter(audio_events)
+        mock_stream.aclose = AsyncMock()
+
+        with patch("providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream):
+            await agent._run_transcription_pipeline(participant, MagicMock(), "en")
+
+        commits = [m for m in sent if m.get("type") == "input_audio_buffer.commit"]
+        closers = [m for m in commits if m.get("final") is True]
+        bare = [m for m in commits if "final" not in m]
+        # Each open sends one bare commit; each close sends one bare + one final.
+        openers = len(bare) - len(closers)
+        assert openers >= 2, (
+            f"expected the stream to reopen after a max-buffer split "
+            f"(>=2 opener commits), got {openers}"
+        )
+
+    async def test_max_buffer_split_segments_get_distinct_start_times(
+        self, monkeypatch
+    ):
+        """
+        Regression for the transcript-overwrite bug: when one long utterance is
+        split by the max-buffer cap, Silero fires no new START_OF_SPEECH, so a
+        shared "speech start" would give both segments the same start_time —
+        the same BBB transcriptId — and segment 2's text would REPLACE segment
+        1's in the transcript. Each opener must record its own start time and
+        the reader must pair segments with them in FIFO order.
+        """
+        import providers.voxtral_realtime as vr
+
+        monkeypatch.setattr(vr, "_MAX_BUFFER_DURATION_S", 0.015)
+        # Deterministic, strictly-increasing clock so the two openers cannot
+        # land on the same wall-clock value (real splits are ~8 s apart).
+        fake_now = [1000.0]
+
+        def _fake_time():
+            fake_now[0] += 1.0
+            return fake_now[0]
+
+        monkeypatch.setattr(vr.time, "time", _fake_time)
+
+        agent = _make_agent(
+            interim_results=True,
+            # START only, no END → continuous speech across the split.
+            vad_events=[_make_vad_event(agents_vad.VADEventType.START_OF_SPEECH)],
+        )
+        participant = MagicMock(spec=rtc.RemoteParticipant)
+        participant.identity = "user_split_ts"
+
+        sent: list[dict] = []
+
+        async def _send_json(data):
+            sent.append(data)
+            await asyncio.sleep(0)
+
+        def _bare_commits():
+            return [
+                m
+                for m in sent
+                if m.get("type") == "input_audio_buffer.commit" and "final" not in m
+            ]
+
+        def _closers():
+            return [
+                m
+                for m in sent
+                if m.get("type") == "input_audio_buffer.commit"
+                and m.get("final") is True
+            ]
+
+        # Deliver each segment's transcription only after the writer has sent
+        # the corresponding commits — mirroring the real server's causality.
+        # Segment 1 events after its close; segment 2 events after reopen
+        # (open1 + close1 + open2 = 3 bare commits).
+        closed_msg = MagicMock()
+        closed_msg.type = aiohttp.WSMsgType.CLOSED
+        script = [
+            (lambda: True, _text_ws_msg({"type": "session.created"})),
+            (
+                lambda: len(_closers()) >= 1,
+                _text_ws_msg({"type": "transcription.delta", "delta": "hello"}),
+            ),
+            (
+                lambda: len(_closers()) >= 1,
+                _text_ws_msg({"type": "transcription.done", "text": "hello"}),
+            ),
+            (
+                lambda: len(_bare_commits()) >= 3,
+                _text_ws_msg({"type": "transcription.delta", "delta": "world"}),
+            ),
+            (
+                lambda: len(_bare_commits()) >= 3,
+                _text_ws_msg({"type": "transcription.done", "text": "world"}),
+            ),
+            (lambda: True, closed_msg),
+        ]
+        script_iter = iter(script)
+
+        async def _receive():
+            try:
+                cond, msg = next(script_iter)
+            except StopIteration:
+                return closed_msg
+            while not cond():
+                await asyncio.sleep(0)
+            return msg
+
+        mock_ws = AsyncMock()
+        mock_ws.receive = _receive
+        mock_ws.send_json = _send_json
+        cm = AsyncMock()
+        cm.__aenter__ = AsyncMock(return_value=mock_ws)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        mock_session = MagicMock()
+        mock_session.ws_connect = MagicMock(return_value=cm)
+        agent._http_session = mock_session
+
+        frames = [_make_loud_frame() for _ in range(6)]
+        audio_events = [MagicMock(frame=f) for f in frames]
+        mock_stream = AsyncMock()
+        mock_stream.__aiter__.return_value = iter(audio_events)
+        mock_stream.aclose = AsyncMock()
+
+        final = []
+        agent.on("final_transcript", lambda **kw: final.append(kw))
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
+        ):
+            await agent._run_transcription_pipeline(participant, MagicMock(), "en")
+        await asyncio.sleep(0)
+
+        texts = [kw["event"].alternatives[0].text for kw in final]
+        assert texts == ["hello", "world"]
+
+        starts = [kw["event"].alternatives[0].start_time for kw in final]
+        assert starts[0] < starts[1], (
+            f"split segments must have distinct, increasing start_times "
+            f"(distinct BBB transcriptIds) — got {starts}; equal values mean "
+            f"segment 2 overwrites segment 1 in the transcript"
         )
