@@ -26,7 +26,11 @@ from livekit.plugins import silero
 
 from providers.base import BaseSttAgent, BaseSttConfig
 
-_MAX_BUFFER_DURATION_S = float(os.getenv("VOXTRAL_MAX_BUFFER_DURATION_S", "8.0"))
+# Safety cap on a single streaming request's length. Only hit during pure
+# monologue (no VAD pause); each cap-triggered split risks cutting a word, so it
+# is set high to make splits rare. Lower it only to commit FINAL transcripts
+# sooner during long continuous speech (interim captions stream regardless).
+_MAX_BUFFER_DURATION_S = float(os.getenv("VOXTRAL_MAX_BUFFER_DURATION_S", "30.0"))
 _TARGET_SAMPLE_RATE = int(os.getenv("VOXTRAL_TARGET_SAMPLE_RATE", "16000"))
 # Silero VAD parameters — replace the old RMS threshold and silence duration
 _VAD_MIN_SILENCE_S = float(os.getenv("VOXTRAL_VAD_MIN_SILENCE_S", "0.6"))
@@ -412,8 +416,12 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
             # owned exclusively by _vad_task. Keeping them separate is what lets a
             # max-buffer split mid-utterance reopen immediately on the next frame
             # (we never clobber the VAD's view of whether speech is ongoing).
-            preroll_max = int(_VAD_PREROLL_S * _TARGET_SAMPLE_RATE) * 2  # int16 bytes
-            preroll = bytearray()  # recent audio captured while no request is open
+            # Pre-roll must not exceed the VAD's min-silence: otherwise a normal
+            # onset could replay the previous utterance's tail (it would not have
+            # rolled out of the buffer during the gap) and duplicate it.
+            preroll_secs_max = min(_VAD_PREROLL_S, _VAD_MIN_SILENCE_S)
+            preroll_max = int(preroll_secs_max * _TARGET_SAMPLE_RATE) * 2  # int16 bytes
+            preroll = bytearray()  # rolling window of the most recent audio
             pending = b""  # audio buffered for chunked append while open
             open_secs = 0.0  # duration of the current open segment
             stream_open = False
@@ -457,7 +465,10 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                 await ws.send_json({"type": "input_audio_buffer.commit"})
                 await ws.send_json({"type": "input_audio_buffer.commit", "final": True})
                 stream_open = False
-                preroll.clear()  # committed; pre-roll only seeds the next onset
+                # Pre-roll is intentionally NOT cleared: if this was a max-buffer
+                # split, the next frame reopens immediately and replays the last
+                # ~0.5 s as overlap so the boundary word is not lost. _open()
+                # clears it after replaying.
 
             async for audio_event in audio_stream:
                 frame = audio_event.frame
@@ -480,11 +491,18 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                     pending += resampled
                     open_secs += frame_duration
                     await _flush_pending()
-                else:
-                    # Idle: keep only a bounded rolling pre-roll; send nothing.
-                    preroll += resampled
-                    if len(preroll) > preroll_max:
-                        del preroll[:-preroll_max]
+
+                # Keep a bounded rolling pre-roll of the most recent audio,
+                # whether idle or open. _open() replays it as the segment's
+                # lead-in: on a fresh onset that is the audio before the VAD
+                # fired; on a max-buffer split it is the overlap that carries
+                # the boundary word fully into the next segment instead of
+                # cutting it in half. Inter-utterance silence (>= Silero's
+                # min_silence, which exceeds the pre-roll length) flushes stale
+                # speech, so a normal onset never replays a prior utterance.
+                preroll += resampled
+                if len(preroll) > preroll_max:
+                    del preroll[:-preroll_max]
 
                 # Close on end-of-speech (Silero) or the max-buffer safety cap.
                 # is_in_speech is deliberately left untouched: if the speaker is
