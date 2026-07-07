@@ -1032,6 +1032,53 @@ class TestReaderFailureRecovery:
         )
 
 
+class TestLocaleUpdateRace:
+    async def test_locale_change_does_not_orphan_replacement_pipeline(self):
+        """
+        Regression for the stop→start restart race: _update_stream_locale
+        cancels the old pipeline task and synchronously registers a new one
+        under the same identity. task.cancel() only schedules the
+        cancellation, so the old task's cleanup runs AFTER the new entry
+        exists — an unconditional pop there deregisters the replacement,
+        leaving it running but untracked (unstoppable, and a later start
+        would spawn a duplicate pipeline on the same track).
+        """
+        participant = _make_participant("user_1")
+        agent = _make_agent_with_room(participants={"p1": participant})
+
+        ws1 = _ScriptedWs([_text_ws_msg({"type": "session.created"})])
+        ws2 = _ScriptedWs([_text_ws_msg({"type": "session.created"})])
+        mock_session = MagicMock()
+        mock_session.ws_connect = MagicMock(
+            side_effect=[_ws_context(ws1), _ws_context(ws2)]
+        )
+        agent._http_session = mock_session
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream",
+            side_effect=[_EndlessAudioStream(), _EndlessAudioStream()],
+        ):
+            agent.start_transcription_for_user("user_1", "en-US", "voxtral-realtime")
+            task1 = agent.processing_info["user_1"]["task"]
+            await asyncio.sleep(0.05)  # let pipeline 1 get going
+
+            agent._update_stream_locale("user_1", "de-DE")
+            task2 = agent.processing_info["user_1"]["task"]
+            assert task2 is not task1
+
+            # Let the cancelled task run its cleanup to completion.
+            await asyncio.wait_for(task1, timeout=5.0)
+            await asyncio.sleep(0)
+
+            assert agent.processing_info.get("user_1", {}).get("task") is task2, (
+                "the cancelled pipeline's cleanup must not deregister its replacement"
+            )
+
+            agent.stop_transcription_for_user("user_1")
+            await asyncio.wait_for(task2, timeout=5.0)
+            assert "user_1" not in agent.processing_info
+
+
 class TestTeardownFlush:
     async def test_cancel_mid_utterance_emits_synthetic_final_and_closing_commit(
         self,
