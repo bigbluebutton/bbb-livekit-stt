@@ -13,6 +13,10 @@ Final releases will consolidate all intermediate changes in chronological order.
 * feat(tests): add unit and integration tests with pytest
 * feat(tests): add coverage reporting with pytest-cov
 * feat(tests): add tests for v0.2.0 changes (utils coercions, config redaction, on_track_subscribed fix, new defaults)
+* feat(voxtral): Voxtral Realtime STT provider with concurrent streaming
+* feat(voxtral): replace RMS VAD with Silero neural VAD on Python 3.11
+* fix(voxtral): reduce word loss at max-buffer segment boundaries
+* fix(voxtral): recover from reader failures and flush segments on teardown
 * build: add GitHub Actions workflow for running tests
 ## v0.2.0
 

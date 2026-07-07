@@ -40,7 +40,9 @@ def _make_config(**kwargs):
 
 
 def _make_agent(vad_events=None, **kwargs):
-    return VoxtralRealtimeSttAgent(_make_config(**kwargs), vad=_make_mock_vad(vad_events))
+    return VoxtralRealtimeSttAgent(
+        _make_config(**kwargs), vad=_make_mock_vad(vad_events)
+    )
 
 
 def _make_participant(identity, has_audio_track=True):
@@ -99,11 +101,18 @@ def _make_loud_frame():
 class TestVoxtralRealtimeConfig:
     @pytest.fixture(autouse=True)
     def _clean_env(self, monkeypatch):
-        for key in ["VOXTRAL_API_KEY", "VOXTRAL_MODEL", "VOXTRAL_BASE_URL", "VOXTRAL_INTERIM_RESULTS"]:
+        for key in [
+            "VOXTRAL_API_KEY",
+            "VOXTRAL_MODEL",
+            "VOXTRAL_BASE_URL",
+            "VOXTRAL_INTERIM_RESULTS",
+        ]:
             monkeypatch.delenv(key, raising=False)
 
     def test_default_model(self):
-        assert VoxtralRealtimeConfig().model == "mistralai/Voxtral-Mini-4B-Realtime-2602"
+        assert (
+            VoxtralRealtimeConfig().model == "mistralai/Voxtral-Mini-4B-Realtime-2602"
+        )
 
     def test_default_api_key_is_none(self):
         assert VoxtralRealtimeConfig().api_key is None
@@ -141,7 +150,10 @@ class TestVoxtralRealtimeConfig:
 class TestBuildWsUrl:
     def test_default_url(self):
         agent = _make_agent()
-        assert agent._build_ws_url() == "wss://api.openai.com/v1/realtime?intent=transcription"
+        assert (
+            agent._build_ws_url()
+            == "wss://api.openai.com/v1/realtime?intent=transcription"
+        )
 
     def test_custom_https_url_becomes_wss(self):
         agent = _make_agent(base_url="https://my-server.example.com/v1")
@@ -210,7 +222,9 @@ class TestStartTranscriptionForUser:
     def test_participant_not_found_logs_error(self, caplog):
         agent = _make_agent_with_room(participants={})
         with caplog.at_level("ERROR"):
-            agent.start_transcription_for_user("ghost_user", "en-US", "voxtral-realtime")
+            agent.start_transcription_for_user(
+                "ghost_user", "en-US", "voxtral-realtime"
+            )
         assert "ghost_user" in caplog.text
         assert "ghost_user" not in agent.processing_info
 
@@ -247,7 +261,9 @@ class TestStartTranscriptionForUser:
         participant = _make_participant("user_1")
         agent = _make_agent_with_room(participants={"p1": participant})
 
-        with patch.object(agent, "_run_transcription_pipeline", new_callable=AsyncMock) as mock_pipeline:
+        with patch.object(
+            agent, "_run_transcription_pipeline", new_callable=AsyncMock
+        ) as mock_pipeline:
             agent.start_transcription_for_user("user_1", "pt-BR", "voxtral-realtime")
             await asyncio.sleep(0)
 
@@ -321,7 +337,9 @@ class TestRunTranscriptionPipeline:
         mock_stream.__aiter__.return_value = iter([])
         mock_stream.aclose = AsyncMock()
 
-        with patch("providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream):
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
+        ):
             await agent._run_transcription_pipeline(participant, MagicMock(), "en")
 
         assert "user_1" not in agent.processing_info
@@ -339,7 +357,9 @@ class TestRunTranscriptionPipeline:
         mock_stream.__aiter__.return_value = iter([])
         mock_stream.aclose = AsyncMock()
 
-        with patch("providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream):
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
+        ):
             await agent._run_transcription_pipeline(participant, MagicMock(), "en")
 
         assert "user_1" not in agent.processing_info
@@ -376,6 +396,7 @@ class TestVadLoop:
 
         mock_ws = AsyncMock()
         mock_ws.receive = AsyncMock(side_effect=all_ws)
+
         # Use a real async function so that awaiting send_json actually yields
         # to the event loop — this gives the concurrent _reader() task a chance
         # to process incoming WS messages while the writer is still sending.
@@ -410,7 +431,9 @@ class TestVadLoop:
         emitted = []
         agent.on("final_transcript", lambda **kw: emitted.append(kw))
 
-        with patch("providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream):
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
+        ):
             await agent._run_transcription_pipeline(participant, MagicMock(), "en")
 
         assert emitted == []
@@ -432,7 +455,9 @@ class TestVadLoop:
         emitted = []
         agent.on("final_transcript", lambda **kw: emitted.append(kw))
 
-        with patch("providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream):
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
+        ):
             await agent._run_transcription_pipeline(participant, MagicMock(), "en")
         await asyncio.sleep(0)
 
@@ -457,7 +482,9 @@ class TestVadLoop:
         agent.on("interim_transcript", lambda **kw: interim.append(kw))
         agent.on("final_transcript", lambda **kw: final.append(kw))
 
-        with patch("providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream):
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
+        ):
             await agent._run_transcription_pipeline(participant, MagicMock(), "en")
         await asyncio.sleep(0)
 
@@ -492,7 +519,9 @@ class TestVadLoop:
         agent.on("interim_transcript", lambda **kw: interim.append(kw))
         agent.on("final_transcript", lambda **kw: final.append(kw))
 
-        with patch("providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream):
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
+        ):
             await agent._run_transcription_pipeline(participant, MagicMock(), "en")
         await asyncio.sleep(0)
 
@@ -529,7 +558,9 @@ class TestVadLoop:
         agent.on("interim_transcript", lambda **kw: interim.append(kw))
         agent.on("final_transcript", lambda **kw: final.append(kw))
 
-        with patch("providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream):
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
+        ):
             await agent._run_transcription_pipeline(participant, MagicMock(), "en")
         await asyncio.sleep(0)
 
@@ -585,7 +616,9 @@ class TestVadLoop:
         mock_stream.__aiter__.return_value = iter(audio_events)
         mock_stream.aclose = AsyncMock()
 
-        with patch("providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream):
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
+        ):
             await agent._run_transcription_pipeline(participant, MagicMock(), "en")
 
         commits = [m for m in sent if m.get("type") == "input_audio_buffer.commit"]
@@ -721,4 +754,242 @@ class TestVadLoop:
             f"split segments must have distinct, increasing start_times "
             f"(distinct BBB transcriptIds) — got {starts}; equal values mean "
             f"segment 2 overwrites segment 1 in the transcript"
+        )
+
+
+# ── Failure recovery and teardown flush ────────────────────────────────────────
+
+
+class _ScriptedWs:
+    """Minimal WS double: serves a fixed message list, then blocks until closed.
+
+    send_json raises ClientError once the socket is closed — mirroring aiohttp,
+    so the writer's send failure is what surfaces a reader-initiated close.
+    """
+
+    def __init__(self, messages):
+        self._messages = list(messages)
+        self.closed = False
+        self.sent: list[dict] = []
+
+    async def receive(self, *args, **kwargs):
+        await asyncio.sleep(0)
+        if self._messages:
+            return self._messages.pop(0)
+        while not self.closed:
+            await asyncio.sleep(0)
+        msg = MagicMock()
+        msg.type = aiohttp.WSMsgType.CLOSED
+        return msg
+
+    async def send_json(self, data):
+        if self.closed:
+            raise aiohttp.ClientError("socket closed")
+        self.sent.append(data)
+        await asyncio.sleep(0)
+
+    async def close(self):
+        self.closed = True
+
+
+class _EndlessAudioStream:
+    """Async audio stream that yields loud frames until abandoned."""
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await asyncio.sleep(0)
+        return MagicMock(frame=_make_loud_frame())
+
+    async def aclose(self):
+        pass
+
+
+def _ws_context(ws):
+    cm = AsyncMock()
+    cm.__aenter__ = AsyncMock(return_value=ws)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return cm
+
+
+class TestReaderFailureRecovery:
+    async def test_server_error_event_closes_ws_and_reconnects(self, monkeypatch):
+        """
+        Regression for silent transcription death: a server `error` event makes
+        the reader exit while the connection stays alive. The reader must close
+        the socket so the writer's sends fail and the pipeline reconnects —
+        otherwise audio keeps streaming into a session nobody reads and every
+        subsequent utterance is lost without a trace.
+        """
+        import providers.voxtral_realtime as vr
+
+        monkeypatch.setattr(vr, "_RETRY_DELAY_INITIAL_S", 0.01)
+
+        agent = _make_agent(
+            vad_events=[_make_vad_event(agents_vad.VADEventType.START_OF_SPEECH)],
+        )
+        participant = MagicMock(spec=rtc.RemoteParticipant)
+        participant.identity = "user_err"
+
+        ws1 = _ScriptedWs(
+            [
+                _text_ws_msg({"type": "session.created"}),
+                _text_ws_msg({"type": "error", "error": "boom"}),
+            ]
+        )
+        ws2 = _ScriptedWs([_text_ws_msg({"type": "session.created"})])
+
+        mock_session = MagicMock()
+        mock_session.ws_connect = MagicMock(
+            side_effect=[_ws_context(ws1), _ws_context(ws2)]
+        )
+        agent._http_session = mock_session
+
+        # First connection: endless frames so the writer keeps sending until
+        # the reader-initiated close makes a send fail. Second connection:
+        # empty stream so the pipeline exits cleanly.
+        empty_stream = AsyncMock()
+        empty_stream.__aiter__.return_value = iter([])
+        empty_stream.aclose = AsyncMock()
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream",
+            side_effect=[_EndlessAudioStream(), empty_stream],
+        ):
+            await asyncio.wait_for(
+                agent._run_transcription_pipeline(participant, MagicMock(), "en"),
+                timeout=5.0,
+            )
+
+        assert ws1.closed, "reader must close the WS after a server error event"
+        assert mock_session.ws_connect.call_count == 2, (
+            "pipeline must reconnect after the reader-initiated close"
+        )
+
+
+class TestTeardownFlush:
+    async def test_cancel_mid_utterance_emits_synthetic_final_and_closing_commit(
+        self,
+    ):
+        """
+        Regression for the speak-then-mute loss: when frames stop before Silero
+        fires END_OF_SPEECH and the task is cancelled (mute / track
+        unsubscribed), the open segment must still (a) send its closing
+        commit(final) so the server request is not left dangling, and (b) emit
+        a FINAL from the delta text already received — otherwise BBB keeps the
+        interim caption pending forever and the utterance is lost.
+        """
+        agent = _make_agent(
+            interim_results=True,
+            vad_events=[_make_vad_event(agents_vad.VADEventType.START_OF_SPEECH)],
+        )
+        participant = MagicMock(spec=rtc.RemoteParticipant)
+        participant.identity = "user_mute"
+
+        # session.created + one delta; transcription.done never arrives.
+        ws = _ScriptedWs(
+            [
+                _text_ws_msg({"type": "session.created"}),
+                _text_ws_msg({"type": "transcription.delta", "delta": "hello"}),
+            ]
+        )
+        mock_session = MagicMock()
+        mock_session.ws_connect = MagicMock(return_value=_ws_context(ws))
+        agent._http_session = mock_session
+
+        interim = []
+        final = []
+        agent.on("interim_transcript", lambda **kw: interim.append(kw))
+        agent.on("final_transcript", lambda **kw: final.append(kw))
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream",
+            return_value=_EndlessAudioStream(),
+        ):
+            task = asyncio.create_task(
+                agent._run_transcription_pipeline(participant, MagicMock(), "en")
+            )
+            # Wait until the delta has been received and emitted as interim.
+            for _ in range(500):
+                if interim:
+                    break
+                await asyncio.sleep(0.01)
+            assert interim, "expected an interim before cancelling"
+
+            task.cancel()
+            await asyncio.wait_for(task, timeout=5.0)
+
+        # Let the emit task scheduled during teardown run.
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+        texts = [kw["event"].alternatives[0].text for kw in final]
+        assert texts == ["hello"], (
+            f"cancellation mid-utterance must emit a best-effort FINAL from the "
+            f"accumulated delta text, got {texts}"
+        )
+        closers = [m for m in ws.sent if m.get("final") is True]
+        assert closers, "cancellation with an open segment must send commit(final=True)"
+
+    async def test_end_of_stream_waits_for_late_transcription_done(self):
+        """
+        Regression for the tail-utterance drop at clean stream end: the server's
+        transcription.done for the flushed segment arrives after the writer has
+        finished. The reader must be drained, not cancelled immediately, so the
+        tail utterance still gets its real FINAL.
+        """
+        agent = _make_agent(
+            interim_results=True,
+            vad_events=[_make_vad_event(agents_vad.VADEventType.START_OF_SPEECH)],
+        )
+        participant = MagicMock(spec=rtc.RemoteParticipant)
+        participant.identity = "user_tail"
+
+        ws = _ScriptedWs([_text_ws_msg({"type": "session.created"})])
+
+        # Release the transcription only after the writer has sent the closing
+        # commit(final) — mirroring real server causality at end of stream.
+        real_receive = ws.receive
+        released = False
+
+        async def _receive(*args, **kwargs):
+            nonlocal released
+            if not ws._messages and not ws.closed and not released:
+                while not any(m.get("final") is True for m in ws.sent):
+                    await asyncio.sleep(0)
+                released = True
+                ws._messages = [
+                    _text_ws_msg({"type": "transcription.delta", "delta": "tail"}),
+                    _text_ws_msg({"type": "transcription.done", "text": "tail words"}),
+                ]
+            return await real_receive()
+
+        ws.receive = _receive
+
+        mock_session = MagicMock()
+        mock_session.ws_connect = MagicMock(return_value=_ws_context(ws))
+        agent._http_session = mock_session
+
+        audio_events = [MagicMock(frame=_make_loud_frame()) for _ in range(3)]
+        mock_stream = AsyncMock()
+        mock_stream.__aiter__.return_value = iter(audio_events)
+        mock_stream.aclose = AsyncMock()
+
+        final = []
+        agent.on("final_transcript", lambda **kw: final.append(kw))
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
+        ):
+            await asyncio.wait_for(
+                agent._run_transcription_pipeline(participant, MagicMock(), "en"),
+                timeout=5.0,
+            )
+        await asyncio.sleep(0)
+
+        texts = [kw["event"].alternatives[0].text for kw in final]
+        assert texts == ["tail words"], (
+            f"the tail segment's late transcription.done must still be read "
+            f"before teardown, got {texts}"
         )
