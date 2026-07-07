@@ -622,13 +622,11 @@ class TestVadLoop:
             await agent._run_transcription_pipeline(participant, MagicMock(), "en")
 
         commits = [m for m in sent if m.get("type") == "input_audio_buffer.commit"]
-        closers = [m for m in commits if m.get("final") is True]
-        bare = [m for m in commits if "final" not in m]
-        # Each open sends one bare commit; each close sends one bare + one final.
-        openers = len(bare) - len(closers)
-        assert openers >= 2, (
+        # Each open sends one bare commit; each close sends one final commit.
+        openers = [m for m in commits if "final" not in m]
+        assert len(openers) >= 2, (
             f"expected the stream to reopen after a max-buffer split "
-            f"(>=2 opener commits), got {openers}"
+            f"(>=2 opener commits), got {len(openers)}"
         )
 
     async def test_max_buffer_split_segments_get_distinct_start_times(
@@ -687,7 +685,7 @@ class TestVadLoop:
         # Deliver each segment's transcription only after the writer has sent
         # the corresponding commits — mirroring the real server's causality.
         # Segment 1 events after its close; segment 2 events after reopen
-        # (open1 + close1 + open2 = 3 bare commits).
+        # (bare commits are openers only: open1 + open2 = 2 bare commits).
         closed_msg = MagicMock()
         closed_msg.type = aiohttp.WSMsgType.CLOSED
         script = [
@@ -701,11 +699,11 @@ class TestVadLoop:
                 _text_ws_msg({"type": "transcription.done", "text": "hello"}),
             ),
             (
-                lambda: len(_bare_commits()) >= 3,
+                lambda: len(_bare_commits()) >= 2,
                 _text_ws_msg({"type": "transcription.delta", "delta": "world"}),
             ),
             (
-                lambda: len(_bare_commits()) >= 3,
+                lambda: len(_bare_commits()) >= 2,
                 _text_ws_msg({"type": "transcription.done", "text": "world"}),
             ),
             (lambda: True, closed_msg),

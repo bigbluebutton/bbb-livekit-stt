@@ -243,6 +243,22 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
         seg_text = ""
         seg_start: float | None = None
 
+        def _pop_segment_start(context: str) -> float:
+            if segment_starts:
+                return segment_starts.popleft()
+            # One transcription.done per opener commit is the pairing
+            # invariant. An empty queue here means the server emitted more
+            # transcription events than segments were opened, so this and
+            # every later segment gets a mis-stamped start_time (and thus a
+            # wrong BBB transcriptId that can overwrite a neighbor's caption).
+            fallback = time.time() - open_time
+            logging.warning(
+                f"Voxtral: {context} with no queued segment start for "
+                f"{participant.identity} — FIFO pairing desync; using "
+                f"wall-clock fallback t={fallback:.3f}s"
+            )
+            return fallback
+
         def _emit_transcript(final: bool, text: str, start_time: float) -> None:
             self.emit(
                 "final_transcript" if final else "interim_transcript",
@@ -318,11 +334,7 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                 if msg_type == "transcription.delta":
                     if seg_start is None:
                         # Pair this segment with the start time its opener pushed.
-                        seg_start = (
-                            segment_starts.popleft()
-                            if segment_starts
-                            else time.time() - open_time
-                        )
+                        seg_start = _pop_segment_start("transcription.delta")
                         logging.debug(
                             f"Voxtral: first delta for {participant.identity} "
                             f"at t={time.time() - open_time:.3f}s "
@@ -347,11 +359,7 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                     if seg_start is None:
                         # Zero-delta segment: consume its queued start anyway so
                         # later segments stay paired with their own openers.
-                        seg_start = (
-                            segment_starts.popleft()
-                            if segment_starts
-                            else time.time() - open_time
-                        )
+                        seg_start = _pop_segment_start("transcription.done")
 
                     if seg_text:
                         _emit_transcript(True, seg_text, seg_start)
@@ -382,8 +390,8 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
         #      server streams transcription.delta events back as audio arrives
         #      (first delta ~0.6 s after speech start), which _reader emits as
         #      INTERIM. While idle, only a bounded pre-roll is kept locally.
-        #   3. On speech end (Silero END_OF_SPEECH or max-buffer): send closing
-        #      commit + commit(final). The server emits transcription.done, which
+        #   3. On speech end (Silero END_OF_SPEECH or max-buffer): send
+        #      commit(final). The server emits transcription.done, which
         #      _reader emits as FINAL.
         # Each segment is its own streaming request with its own entry in
         # segment_starts, so consecutive segments — including max-buffer splits
@@ -468,12 +476,17 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                     await _flush_pending()
 
             async def _close() -> None:
-                """Flush remaining audio and close the utterance's request."""
+                """Flush remaining audio and close the utterance's request.
+
+                Only commit(final) is sent, matching the vLLM reference client.
+                Probe test 5 confirmed a preceding bare commit is redundant —
+                same text, one done either way — and it delays the done by
+                ~0.35 s (the server processes an extra commit boundary first).
+                """
                 nonlocal stream_open, pending
                 if pending:
                     await _append(pending)
                     pending = b""
-                await ws.send_json({"type": "input_audio_buffer.commit"})
                 await ws.send_json({"type": "input_audio_buffer.commit", "final": True})
                 stream_open = False
                 # Pre-roll is intentionally NOT cleared: if this was a max-buffer
@@ -571,6 +584,13 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
             vad_task.cancel()
             await asyncio.gather(reader_task, vad_task, return_exceptions=True)
             await vad_stream.aclose()
+            if segment_starts:
+                # Expected when teardown interrupts an open segment; anything
+                # beyond that means dones went missing (see _pop_segment_start).
+                logging.info(
+                    f"Voxtral: {len(segment_starts)} opened segment(s) without a "
+                    f"transcription.done at teardown for {participant.identity}"
+                )
             if seg_text:
                 # Teardown caught a segment mid-flight: its transcription.done
                 # will never be read, and BBB would show the already-emitted

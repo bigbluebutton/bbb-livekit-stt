@@ -17,6 +17,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 * feat(voxtral): replace RMS VAD with Silero neural VAD on Python 3.11
 * fix(voxtral): reduce word loss at max-buffer segment boundaries
 * fix(voxtral): recover from reader failures and flush segments on teardown
+* fix(voxtral): drop redundant bare commit at segment close, detect done/segment desync
 * build: add GitHub Actions workflow for running tests
 ## v0.2.0
 
