@@ -14,7 +14,7 @@ from livekit.agents import vad as agents_vad
 from providers.voxtral_realtime import (
     VoxtralRealtimeConfig,
     VoxtralRealtimeSttAgent,
-    _to_pcm16_16k,
+    _AudioNormalizer,
 )
 
 
@@ -177,14 +177,14 @@ class TestBuildWsUrl:
 # ── PCM conversion ─────────────────────────────────────────────────────────────
 
 
-class TestToPcm16_16k:
+class TestAudioNormalizer:
     def test_returns_bytes(self):
         frame = _make_audio_frame()
-        assert isinstance(_to_pcm16_16k(frame), bytes)
+        assert isinstance(_AudioNormalizer().process(frame), bytes)
 
     def test_mono_16k_passthrough_preserves_values(self):
         frame = _make_audio_frame(amplitude=1000, sample_rate=16000, num_channels=1)
-        result = _to_pcm16_16k(frame)
+        result = _AudioNormalizer().process(frame)
         samples = np.frombuffer(result, dtype=np.int16)
         assert len(samples) == frame.samples_per_channel
         assert all(s == 1000 for s in samples)
@@ -192,28 +192,57 @@ class TestToPcm16_16k:
     def test_stereo_downmix_to_mono(self):
         """Stereo frame with equal channels averages to same amplitude."""
         frame = _make_audio_frame(amplitude=1000, sample_rate=16000, num_channels=2)
-        result = _to_pcm16_16k(frame)
+        result = _AudioNormalizer().process(frame)
         samples = np.frombuffer(result, dtype=np.int16)
         assert len(samples) == frame.samples_per_channel
         assert all(s == 1000 for s in samples)
 
-    def test_resampling_from_48k_produces_correct_length(self):
-        frame = _make_audio_frame(amplitude=500, sample_rate=48000, num_channels=1)
-        result = _to_pcm16_16k(frame)
-        samples = np.frombuffer(result, dtype=np.int16)
-        expected = round(frame.samples_per_channel * 16000 / 48000)
-        assert len(samples) == expected
+    def test_resampling_from_48k_produces_correct_total_length(self):
+        """process() over many frames + flush() yields ~1/3 the samples.
 
-    def test_values_are_clipped_to_int16_range(self):
-        """numpy clip must keep all output values within ±32767."""
-        frame = _make_audio_frame(amplitude=0, sample_rate=16000, num_channels=1)
-        # Override with float32 extremes stored as int16 (will saturate on cast)
-        raw = np.array([32767, -32768, 0], dtype=np.float32)
-        frame.data = raw.astype(np.int16).tobytes()
-        frame.samples_per_channel = 3
-        result = _to_pcm16_16k(frame)
-        out = np.frombuffer(result, dtype=np.int16)
-        assert all(-32768 <= s <= 32767 for s in out)
+        The resampler is streaming, so individual frames may return fewer
+        samples (filter latency); only the drained total is deterministic.
+        """
+        normalizer = _AudioNormalizer()
+        n_frames = 20  # 200 ms at 48 kHz
+        out = b"".join(
+            normalizer.process(_make_audio_frame(amplitude=500, sample_rate=48000))
+            for _ in range(n_frames)
+        )
+        out += normalizer.flush()
+        total_in = n_frames * 160
+        expected = total_in * 16000 // 48000
+        got = len(out) // 2
+        assert abs(got - expected) <= 32, f"expected ~{expected} samples, got {got}"
+
+    def test_downsampling_attenuates_above_target_nyquist(self):
+        """Anti-aliasing regression: a 10 kHz tone at 48 kHz lies above the
+        16 kHz target's Nyquist (8 kHz) and must be strongly attenuated.
+        Naive linear interpolation instead folds it into the speech band at
+        nearly full energy — the defect this normalizer replaces.
+        """
+        normalizer = _AudioNormalizer()
+        rate_in, tone_hz, duration_s = 48000, 10000, 0.2
+        t = np.arange(int(rate_in * duration_s)) / rate_in
+        tone = (0.5 * 32767 * np.sin(2 * np.pi * tone_hz * t)).astype(np.int16)
+
+        out = bytearray()
+        frame_samples = 480  # 10 ms frames, as LiveKit delivers
+        for i in range(0, len(tone), frame_samples):
+            chunk = tone[i : i + frame_samples]
+            frame = _make_audio_frame(sample_rate=rate_in)
+            frame.data = chunk.tobytes()
+            frame.samples_per_channel = len(chunk)
+            out += normalizer.process(frame)
+        out += normalizer.flush()
+
+        in_rms = np.sqrt(np.mean(tone.astype(np.float64) ** 2))
+        out_samples = np.frombuffer(bytes(out), dtype=np.int16).astype(np.float64)
+        out_rms = np.sqrt(np.mean(out_samples**2)) if len(out_samples) else 0.0
+        assert out_rms < 0.1 * in_rms, (
+            f"10 kHz tone must be attenuated by the anti-aliasing filter "
+            f"(in_rms={in_rms:.0f}, out_rms={out_rms:.0f})"
+        )
 
 
 # ── start_transcription_for_user ───────────────────────────────────────────────

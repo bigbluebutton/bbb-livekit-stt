@@ -469,6 +469,7 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
             pending = b""  # audio buffered for chunked append while open
             open_secs = 0.0  # duration of the current open segment
             stream_open = False
+            normalizer = _AudioNormalizer()  # stateful: one per audio stream
 
             async def _append(data: bytes) -> None:
                 await ws.send_json(
@@ -536,7 +537,7 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                     vad_stream.push_frame(frame)
                     await asyncio.sleep(0)
 
-                    resampled = _to_pcm16_16k(frame)
+                    resampled = normalizer.process(frame)
 
                     # An END arriving while no request is open means the
                     # cap-split utterance finished before the reopen (or a
@@ -595,8 +596,9 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                         )
                 raise
 
-            # End of stream: flush any open request.
+            # End of stream: drain the resampler tail and flush any open request.
             if stream_open:
+                pending += normalizer.flush()
                 await _close()
             vad_stream.end_input()
 
@@ -647,20 +649,36 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                 )
 
 
-def _to_pcm16_16k(frame: rtc.AudioFrame) -> bytes:
-    """Resample an AudioFrame to 16 kHz mono PCM16."""
-    samples = np.frombuffer(frame.data, dtype=np.int16).astype(np.float32)
+class _AudioNormalizer:
+    """Downmix to mono and resample to _TARGET_SAMPLE_RATE PCM16.
 
-    if frame.num_channels > 1:
-        samples = samples.reshape(-1, frame.num_channels).mean(axis=1)
+    Wraps rtc.AudioResampler (SoX), which low-pass filters before decimating —
+    naive linear interpolation aliases everything above the target Nyquist
+    (8 kHz) into the speech band and measurably hurts transcription accuracy.
+    The resampler is streaming: its filter state must persist across frames,
+    so use one instance per audio stream, and call flush() at end of stream
+    to drain the tail samples held back by the filter.
+    """
 
-    if frame.sample_rate != _TARGET_SAMPLE_RATE:
-        n_orig = len(samples)
-        n_target = int(round(n_orig * _TARGET_SAMPLE_RATE / frame.sample_rate))
-        samples = np.interp(
-            np.linspace(0, n_orig - 1, n_target),
-            np.arange(n_orig),
-            samples,
-        )
+    def __init__(self):
+        self._resampler: rtc.AudioResampler | None = None
+        self._input_rate: int | None = None
 
-    return np.clip(samples, -32768, 32767).astype(np.int16).tobytes()
+    def process(self, frame: rtc.AudioFrame) -> bytes:
+        samples = np.frombuffer(frame.data, dtype=np.int16)
+        if frame.num_channels > 1:
+            samples = (
+                samples.reshape(-1, frame.num_channels).mean(axis=1).astype(np.int16)
+            )
+        if frame.sample_rate == _TARGET_SAMPLE_RATE:
+            return samples.tobytes()
+        if self._input_rate != frame.sample_rate:
+            self._resampler = rtc.AudioResampler(frame.sample_rate, _TARGET_SAMPLE_RATE)
+            self._input_rate = frame.sample_rate
+        frames = self._resampler.push(bytearray(samples.tobytes()))
+        return b"".join(bytes(f.data) for f in frames)
+
+    def flush(self) -> bytes:
+        if self._resampler is None:
+            return b""
+        return b"".join(bytes(f.data) for f in self._resampler.flush())
