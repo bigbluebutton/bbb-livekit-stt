@@ -2,7 +2,9 @@
 
 vLLM's protocol differs from the OpenAI Realtime Transcription API in three ways:
 - session.update: model is at the top level, not nested inside session.audio
-- No server-side VAD: client must send input_audio_buffer.commit to trigger generation
+- No server-side VAD: the client segments speech itself — a bare
+  input_audio_buffer.commit opens a streaming request, commit(final: true)
+  closes it (verified in notes/progressive-transcription-investigation.md)
 - Response events: transcription.delta / transcription.done (not conversation.item.*)
 
 Audio must be PCM16, 16 kHz, mono, base64-encoded.
@@ -27,11 +29,16 @@ from livekit.plugins import silero
 from providers.base import BaseSttAgent, BaseSttConfig
 
 # Safety cap on a single streaming request's length. Only hit during pure
-# monologue (no VAD pause); each cap-triggered split risks cutting a word, so it
-# is set high to make splits rare. Lower it only to commit FINAL transcripts
-# sooner during long continuous speech (interim captions stream regardless).
+# monologue (no VAD pause). It serves two purposes: BBB only commits a caption
+# on transcription.done, so the cap bounds FINAL latency and caption size when
+# a speaker never pauses; and vLLM resets its position counter per commit
+# cycle (not per connection), so the cap also bounds per-request context —
+# exceeding --max-model-len crashes the whole engine. At 80 ms/token, 30 s is
+# ~375 tokens, far from any realistic limit; splits replay _SPLIT_OVERLAP_S so
+# lowering the cap mainly trades boundary-word duplication for faster FINALs.
 _MAX_BUFFER_DURATION_S = float(os.getenv("VOXTRAL_MAX_BUFFER_DURATION_S", "30.0"))
-_TARGET_SAMPLE_RATE = int(os.getenv("VOXTRAL_TARGET_SAMPLE_RATE", "16000"))
+# The model requires 16 kHz mono PCM16; deliberately not configurable.
+_TARGET_SAMPLE_RATE = 16000
 # Silero VAD parameters — replace the old RMS threshold and silence duration
 _VAD_MIN_SILENCE_S = float(os.getenv("VOXTRAL_VAD_MIN_SILENCE_S", "0.6"))
 _VAD_ACTIVATION_THRESHOLD = float(os.getenv("VOXTRAL_VAD_ACTIVATION_THRESHOLD", "0.5"))
@@ -81,6 +88,14 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
         vad: agents_vad.VAD | None = None,
     ):
         super().__init__(config)
+        if not config.base_url:
+            # Fail at startup rather than with confusing auth/protocol errors
+            # mid-meeting: Voxtral Realtime is served by a self-hosted vLLM
+            # instance, never by api.openai.com.
+            raise ValueError(
+                "VOXTRAL_BASE_URL is required for the voxtral-realtime provider "
+                "(the URL of your vLLM server, e.g. https://your-server:8000/v1)."
+            )
         self._http_session: aiohttp.ClientSession | None = None
         self._vad: agents_vad.VAD = vad or silero.VAD.load(
             min_silence_duration=_VAD_MIN_SILENCE_S,
@@ -95,7 +110,7 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
         return self._http_session
 
     def _build_ws_url(self) -> str:
-        base = (self.config.base_url or "https://api.openai.com/v1").rstrip("/")
+        base = self.config.base_url.rstrip("/")
         base = base.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
         return f"{base}/realtime?intent=transcription"
 
@@ -197,7 +212,11 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
 
                 except asyncio.CancelledError:
                     raise
-                except (aiohttp.ClientError, ConnectionResetError) as e:
+                except (TimeoutError, aiohttp.ClientError, ConnectionResetError) as e:
+                    # TimeoutError covers a slow session.created handshake —
+                    # vLLM takes 2–5 min of CUDA-graph warmup after startup,
+                    # during which giving up permanently would cost the
+                    # participant the whole meeting. Retry with backoff.
                     logging.warning(
                         f"Voxtral WS connection lost for {participant.identity} "
                         f"({type(e).__name__}: {e}), reconnecting in {retry_delay:.0f}s"

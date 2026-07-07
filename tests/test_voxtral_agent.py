@@ -37,6 +37,7 @@ def _make_mock_vad(vad_events=None):
 
 
 def _make_config(**kwargs):
+    kwargs.setdefault("base_url", "https://test-server.example.com/v1")
     return VoxtralRealtimeConfig(api_key="test-key", **kwargs)
 
 
@@ -149,12 +150,14 @@ class TestVoxtralRealtimeConfig:
 
 
 class TestBuildWsUrl:
-    def test_default_url(self):
-        agent = _make_agent()
-        assert (
-            agent._build_ws_url()
-            == "wss://api.openai.com/v1/realtime?intent=transcription"
-        )
+    def test_missing_base_url_raises_at_agent_creation(self):
+        """Voxtral is self-hosted; defaulting to api.openai.com can only
+        produce confusing auth/protocol errors mid-meeting. Fail at startup."""
+        with pytest.raises(ValueError, match="VOXTRAL_BASE_URL"):
+            VoxtralRealtimeSttAgent(
+                VoxtralRealtimeConfig(api_key="test-key", base_url=None),
+                vad=_make_mock_vad(),
+            )
 
     def test_custom_https_url_becomes_wss(self):
         agent = _make_agent(base_url="https://my-server.example.com/v1")
@@ -1058,6 +1061,54 @@ class TestReaderFailureRecovery:
         assert ws1.closed, "reader must close the WS after a server error event"
         assert mock_session.ws_connect.call_count == 2, (
             "pipeline must reconnect after the reader-initiated close"
+        )
+
+
+class TestHandshakeTimeout:
+    async def test_slow_session_created_retries_instead_of_giving_up(self, monkeypatch):
+        """
+        Regression for permanent give-up during server warmup: vLLM takes
+        minutes of CUDA-graph warmup after startup, during which the WS may
+        connect but session.created arrives late. A handshake timeout must
+        retry with backoff like a connection error — not end transcription
+        for the participant's whole meeting.
+        """
+        import providers.voxtral_realtime as vr
+
+        monkeypatch.setattr(vr, "_RETRY_DELAY_INITIAL_S", 0.01)
+
+        agent = _make_agent(vad_events=[])
+        participant = MagicMock(spec=rtc.RemoteParticipant)
+        participant.identity = "user_warmup"
+
+        # First connection: session.created never arrives (handshake timeout).
+        slow_ws = AsyncMock()
+        slow_ws.receive = AsyncMock(side_effect=asyncio.TimeoutError)
+        ws2 = _ScriptedWs([_text_ws_msg({"type": "session.created"})])
+
+        mock_session = MagicMock()
+        mock_session.ws_connect = MagicMock(
+            side_effect=[_ws_context(slow_ws), _ws_context(ws2)]
+        )
+        agent._http_session = mock_session
+
+        empty = AsyncMock()
+        empty.__aiter__.return_value = iter([])
+        empty.aclose = AsyncMock()
+        empty2 = AsyncMock()
+        empty2.__aiter__.return_value = iter([])
+        empty2.aclose = AsyncMock()
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream", side_effect=[empty, empty2]
+        ):
+            await asyncio.wait_for(
+                agent._run_transcription_pipeline(participant, MagicMock(), "en"),
+                timeout=5.0,
+            )
+
+        assert mock_session.ws_connect.call_count == 2, (
+            "a handshake timeout must reconnect with backoff, not give up"
         )
 
 

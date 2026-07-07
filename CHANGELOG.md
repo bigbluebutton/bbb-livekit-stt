@@ -21,6 +21,8 @@ Final releases will consolidate all intermediate changes in chronological order.
 * fix(voxtral): replay a longer overlap when reopening after a max-buffer split
 * fix(voxtral): keep replacement pipeline tracked across locale-change restarts
 * fix(voxtral): resample with rtc.AudioResampler to stop aliasing into the speech band
+* fix(voxtral): retry on handshake timeout, require VOXTRAL_BASE_URL at startup
+* docs: document the Voxtral Realtime provider and Python 3.11 requirement in README
 * build: add GitHub Actions workflow for running tests
 ## v0.2.0
 
