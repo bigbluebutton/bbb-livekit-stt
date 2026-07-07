@@ -1064,6 +1064,40 @@ class TestReaderFailureRecovery:
         )
 
 
+class TestSessionUpdate:
+    async def test_sends_flat_model_and_greedy_temperature(self):
+        """vLLM requires a FLAT session.update (nesting under "session" is
+        rejected with "Missing required field: model" — probe test 6), and
+        the model card mandates temperature 0.0 for stable transcription."""
+        agent = _make_agent(vad_events=[])
+        participant = MagicMock(spec=rtc.RemoteParticipant)
+        participant.identity = "user_cfg"
+
+        ws = _ScriptedWs([_text_ws_msg({"type": "session.created"})])
+        mock_session = MagicMock()
+        mock_session.ws_connect = MagicMock(return_value=_ws_context(ws))
+        agent._http_session = mock_session
+
+        empty = AsyncMock()
+        empty.__aiter__.return_value = iter([])
+        empty.aclose = AsyncMock()
+
+        with patch("providers.voxtral_realtime.rtc.AudioStream", return_value=empty):
+            await asyncio.wait_for(
+                agent._run_transcription_pipeline(participant, MagicMock(), "en"),
+                timeout=5.0,
+            )
+
+        updates = [m for m in ws.sent if m.get("type") == "session.update"]
+        assert updates == [
+            {
+                "type": "session.update",
+                "model": agent.config.model,
+                "temperature": 0.0,
+            }
+        ]
+
+
 class TestHandshakeTimeout:
     async def test_slow_session_created_retries_instead_of_giving_up(self, monkeypatch):
         """

@@ -200,9 +200,17 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                         # Connection is healthy again; reset reconnect backoff.
                         retry_delay = _RETRY_DELAY_INITIAL_S
 
-                        # vLLM expects model at top level of session.update
+                        # vLLM expects a FLAT session.update — model and
+                        # temperature at the top level; nesting under
+                        # "session" is rejected (probe test 6). The model
+                        # card mandates temperature 0.0: greedy decoding is
+                        # required for stable transcription.
                         await ws.send_json(
-                            {"type": "session.update", "model": self.config.model}
+                            {
+                                "type": "session.update",
+                                "model": self.config.model,
+                                "temperature": 0.0,
+                            }
                         )
 
                         await self._vad_loop(
