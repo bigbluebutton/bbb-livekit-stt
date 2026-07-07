@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -752,6 +753,171 @@ class TestVadLoop:
             f"split segments must have distinct, increasing start_times "
             f"(distinct BBB transcriptIds) — got {starts}; equal values mean "
             f"segment 2 overwrites segment 1 in the transcript"
+        )
+
+
+# ── Split overlap and onset pre-roll ───────────────────────────────────────────
+
+
+def _segments_from_sent(sent: list[dict]) -> list[bytes]:
+    """Group appended audio bytes into segments delimited by opener commits."""
+    segments: list[bytearray] = []
+    for m in sent:
+        t = m.get("type")
+        if t == "input_audio_buffer.commit" and "final" not in m:
+            segments.append(bytearray())
+        elif t == "input_audio_buffer.append" and segments:
+            segments[-1] += base64.b64decode(m["audio"])
+    return [bytes(s) for s in segments]
+
+
+class _DeferredStartVadStream:
+    """VAD stream double that fires START_OF_SPEECH after N pushed frames."""
+
+    def __init__(self, after_frames: int):
+        self._after = after_frames
+        self.pushed = 0
+        self._fired = False
+
+    def push_frame(self, _frame):
+        self.pushed += 1
+
+    def end_input(self):
+        pass
+
+    async def aclose(self):
+        pass
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._fired:
+            await asyncio.Event().wait()  # block until cancelled
+        while self.pushed < self._after:
+            await asyncio.sleep(0)
+        self._fired = True
+        return _make_vad_event(agents_vad.VADEventType.START_OF_SPEECH)
+
+
+class TestSplitOverlap:
+    def _run_pipeline(self, agent, frames):
+        participant = MagicMock(spec=rtc.RemoteParticipant)
+        participant.identity = "user_overlap"
+
+        sent: list[dict] = []
+
+        async def _send_json(data):
+            sent.append(data)
+            await asyncio.sleep(0)
+
+        mock_ws = AsyncMock()
+        mock_ws.receive = AsyncMock(
+            side_effect=[_text_ws_msg({"type": "session.created"})]
+        )
+        mock_ws.send_json = _send_json
+        cm = AsyncMock()
+        cm.__aenter__ = AsyncMock(return_value=mock_ws)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        mock_session = MagicMock()
+        mock_session.ws_connect = MagicMock(return_value=cm)
+        agent._http_session = mock_session
+
+        audio_events = [MagicMock(frame=f) for f in frames]
+        mock_stream = AsyncMock()
+        mock_stream.__aiter__.return_value = iter(audio_events)
+        mock_stream.aclose = AsyncMock()
+
+        return participant, mock_stream, sent
+
+    async def test_split_reopen_replays_overlap(self, monkeypatch):
+        """
+        Regression for word loss at max-buffer splits: the reopened segment
+        must begin with the overlap — the tail of the audio already sent in
+        the previous segment — so boundary words carry fully into the new
+        request instead of being cut at the commit boundary.
+        """
+        import providers.voxtral_realtime as vr
+
+        monkeypatch.setattr(vr, "_MAX_BUFFER_DURATION_S", 0.015)
+        # Shrink the onset pre-roll far below one frame so a full-frame overlap
+        # can ONLY come from the split path: if the reopen were mistaken for a
+        # fresh onset, it would replay a sliver and the assertion would fail.
+        monkeypatch.setattr(vr, "_VAD_PREROLL_S", 0.005)
+
+        agent = _make_agent(
+            # START only, no END → continuous speech across the split.
+            vad_events=[_make_vad_event(agents_vad.VADEventType.START_OF_SPEECH)],
+        )
+        # Distinct per-frame amplitudes so overlapping byte ranges are
+        # distinguishable (constant amplitude would make any comparison pass).
+        frames = [_make_audio_frame(amplitude=100 + i) for i in range(6)]
+        participant, mock_stream, sent = self._run_pipeline(agent, frames)
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
+        ):
+            await agent._run_transcription_pipeline(participant, MagicMock(), "en")
+
+        segments = _segments_from_sent(sent)
+        assert len(segments) >= 2, f"expected a split, got {len(segments)} segment(s)"
+        seg1, seg2 = segments[0], segments[1]
+
+        frame_bytes = 320  # 160 samples of int16
+        overlap = min(len(seg1), len(seg2))
+        assert overlap >= frame_bytes and seg1.endswith(seg2[:overlap]), (
+            "the reopened segment must start with the tail of the previous "
+            "segment's audio (the split overlap)"
+        )
+
+    async def test_fresh_onset_replay_is_capped(self, monkeypatch):
+        """
+        The rolling buffer is now sized for the split overlap (long), but a
+        FRESH onset must still replay only the onset pre-roll — otherwise it
+        would replay the previous utterance's tail from before the silence
+        gap and duplicate it.
+        """
+        import providers.voxtral_realtime as vr
+
+        onset_secs = 0.02  # 2 frames
+        monkeypatch.setattr(vr, "_VAD_PREROLL_S", onset_secs)
+        monkeypatch.setattr(vr, "_SPLIT_OVERLAP_S", 10.0)  # buffer far larger
+
+        idle_frames = 100  # 1 s of audio buffered before speech starts
+        vad_stream = _DeferredStartVadStream(after_frames=idle_frames)
+        mock_vad = MagicMock()
+        mock_vad.stream.return_value = vad_stream
+        agent = VoxtralRealtimeSttAgent(_make_config(), vad=mock_vad)
+
+        frames = [_make_audio_frame(amplitude=100 + i) for i in range(idle_frames + 4)]
+        participant, mock_stream, sent = self._run_pipeline(agent, frames)
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
+        ):
+            await asyncio.wait_for(
+                agent._run_transcription_pipeline(participant, MagicMock(), "en"),
+                timeout=5.0,
+            )
+
+        segments = _segments_from_sent(sent)
+        assert len(segments) == 1, f"expected one segment, got {len(segments)}"
+        seg = segments[0]
+
+        frame_bytes = 320
+        onset_bytes = int(onset_secs * 16000) * 2
+        full_audio = b"".join(f.data for f in frames)
+
+        # The segment must be a contiguous suffix of the input audio (replay
+        # directly precedes the live frames, no gap) …
+        assert full_audio.endswith(seg), "segment audio must be a contiguous suffix"
+        # … and bounded: onset replay + the few frames after the VAD fired —
+        # NOT the ~32 kB of idle audio sitting in the oversized buffer.
+        max_live_frames = 6
+        assert len(seg) <= onset_bytes + max_live_frames * frame_bytes, (
+            f"fresh onset replayed {len(seg)} bytes; the onset cap is "
+            f"{onset_bytes} bytes — the long split-overlap buffer must not be "
+            f"replayed on a fresh onset"
         )
 
 

@@ -18,6 +18,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 * fix(voxtral): reduce word loss at max-buffer segment boundaries
 * fix(voxtral): recover from reader failures and flush segments on teardown
 * fix(voxtral): drop redundant bare commit at segment close, detect done/segment desync
+* fix(voxtral): replay a longer overlap when reopening after a max-buffer split
 * build: add GitHub Actions workflow for running tests
 ## v0.2.0
 

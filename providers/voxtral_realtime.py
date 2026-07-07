@@ -38,6 +38,12 @@ _VAD_ACTIVATION_THRESHOLD = float(os.getenv("VOXTRAL_VAD_ACTIVATION_THRESHOLD", 
 # Rolling pre-roll kept while idle so the word onset preceding Silero's
 # START_OF_SPEECH (its prefix padding) is sent once a streaming request opens.
 _VAD_PREROLL_S = float(os.getenv("VOXTRAL_VAD_PREROLL_S", "0.5"))
+# Audio replayed when a max-buffer split reopens mid-speech. The reopened
+# request starts mid-utterance with no context; the Voxtral paper recommends
+# ~1.28 s of lead-in (16 frames, "similar to attention sinks"), so short
+# overlap loses or garbles the words right after a split. The overlap is
+# transcribed twice — some duplication at split boundaries is the trade-off.
+_SPLIT_OVERLAP_S = float(os.getenv("VOXTRAL_SPLIT_OVERLAP_S", "1.5"))
 # Reconnect backoff bounds for a dropped WebSocket connection.
 _RETRY_DELAY_INITIAL_S = 1.0
 _RETRY_DELAY_MAX_S = 30.0
@@ -435,12 +441,23 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
             # owned exclusively by _vad_task. Keeping them separate is what lets a
             # max-buffer split mid-utterance reopen immediately on the next frame
             # (we never clobber the VAD's view of whether speech is ongoing).
-            # Pre-roll must not exceed the VAD's min-silence: otherwise a normal
-            # onset could replay the previous utterance's tail (it would not have
-            # rolled out of the buffer during the gap) and duplicate it.
-            preroll_secs_max = min(_VAD_PREROLL_S, _VAD_MIN_SILENCE_S)
-            preroll_max = int(preroll_secs_max * _TARGET_SAMPLE_RATE) * 2  # int16 bytes
+            #
+            # One rolling buffer of recent audio, two replay lengths at _open():
+            # - Fresh onset: at most the VAD pre-roll, capped by min-silence —
+            #   otherwise a normal onset could replay the previous utterance's
+            #   tail (it would not have rolled out of the buffer during the
+            #   gap) and duplicate it.
+            # - Max-buffer split reopen: the full split overlap. Mid-speech the
+            #   buffer holds only the current utterance, so the longer replay
+            #   is safe and gives the reopened request the left-context the
+            #   model needs (see _SPLIT_OVERLAP_S).
+            onset_max = (
+                int(min(_VAD_PREROLL_S, _VAD_MIN_SILENCE_S) * _TARGET_SAMPLE_RATE) * 2
+            )
+            split_max = int(_SPLIT_OVERLAP_S * _TARGET_SAMPLE_RATE) * 2  # int16 bytes
+            preroll_max = max(onset_max, split_max)
             preroll = bytearray()  # rolling window of the most recent audio
+            split_reopen = False  # next _open() continues a cap-split utterance
             pending = b""  # audio buffered for chunked append while open
             open_secs = 0.0  # duration of the current open segment
             stream_open = False
@@ -461,18 +478,23 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
 
             async def _open() -> None:
                 """Open a streaming request and replay the captured lead-in."""
-                nonlocal stream_open, pending, open_secs
+                nonlocal stream_open, pending, open_secs, split_reopen
                 commit_event.clear()  # discard any stale END from a prior segment
-                # Record this segment's start (backdated by the replayed pre-roll)
+                limit = split_max if split_reopen else onset_max
+                split_reopen = False
+                replay = (
+                    bytes(preroll[max(0, len(preroll) - limit) :]) if limit > 0 else b""
+                )
+                preroll.clear()
+                # Record this segment's start (backdated by the replayed lead-in)
                 # for the reader to pair with the segment's transcription events.
-                preroll_secs = len(preroll) / (_TARGET_SAMPLE_RATE * 2)
-                segment_starts.append(time.time() - open_time - preroll_secs)
+                replay_secs = len(replay) / (_TARGET_SAMPLE_RATE * 2)
+                segment_starts.append(time.time() - open_time - replay_secs)
                 await ws.send_json({"type": "input_audio_buffer.commit"})
                 stream_open = True
                 open_secs = 0.0
-                if preroll:
-                    pending += bytes(preroll)
-                    preroll.clear()
+                if replay:
+                    pending += replay
                     await _flush_pending()
 
             async def _close() -> None:
@@ -489,10 +511,10 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                     pending = b""
                 await ws.send_json({"type": "input_audio_buffer.commit", "final": True})
                 stream_open = False
-                # Pre-roll is intentionally NOT cleared: if this was a max-buffer
-                # split, the next frame reopens immediately and replays the last
-                # ~0.5 s as overlap so the boundary word is not lost. _open()
-                # clears it after replaying.
+                # The rolling buffer is intentionally NOT cleared: if this was a
+                # max-buffer split, the next frame reopens immediately and
+                # replays the split overlap so the boundary words carry fully
+                # into the next segment. _open() clears it after replaying.
 
             try:
                 async for audio_event in audio_stream:
@@ -508,6 +530,14 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
 
                     resampled = _to_pcm16_16k(frame)
 
+                    # An END arriving while no request is open means the
+                    # cap-split utterance finished before the reopen (or a
+                    # prior segment's END is stale): whatever opens next is a
+                    # fresh onset, not a split continuation.
+                    if not stream_open and commit_event.is_set():
+                        commit_event.clear()
+                        split_reopen = False
+
                     # Open a request as soon as the VAD reports speech.
                     if is_in_speech and not stream_open:
                         await _open()
@@ -517,17 +547,16 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                         open_secs += frame_duration
                         await _flush_pending()
 
-                    # Keep a bounded rolling pre-roll of the most recent audio,
-                    # whether idle or open. _open() replays it as the segment's
-                    # lead-in: on a fresh onset that is the audio before the VAD
-                    # fired; on a max-buffer split it is the overlap that carries
-                    # the boundary word fully into the next segment instead of
-                    # cutting it in half. Inter-utterance silence (>= Silero's
-                    # min_silence, which exceeds the pre-roll length) flushes stale
-                    # speech, so a normal onset never replays a prior utterance.
+                    # Keep a bounded rolling buffer of the most recent audio,
+                    # whether idle or open. _open() replays its tail as the
+                    # segment's lead-in: on a fresh onset the onset-capped
+                    # pre-roll (the audio before the VAD fired); on a
+                    # max-buffer split the full overlap that carries the
+                    # boundary words into the next segment instead of cutting
+                    # them in half.
                     preroll += resampled
                     if len(preroll) > preroll_max:
-                        del preroll[:-preroll_max]
+                        del preroll[: len(preroll) - preroll_max]
 
                     # Close on end-of-speech (Silero) or the max-buffer safety cap.
                     # is_in_speech is deliberately left untouched: if the speaker is
@@ -535,6 +564,10 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                     if stream_open and (
                         commit_event.is_set() or open_secs >= _MAX_BUFFER_DURATION_S
                     ):
+                        # A cap-triggered close (no END) splits mid-speech; the
+                        # reopen replays the full overlap instead of the onset
+                        # pre-roll.
+                        split_reopen = not commit_event.is_set()
                         commit_event.clear()
                         await _close()
             except asyncio.CancelledError:
