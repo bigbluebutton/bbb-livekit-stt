@@ -953,6 +953,332 @@ class TestSplitOverlap:
         )
 
 
+# ── Commit gate ────────────────────────────────────────────────────────────────
+
+
+class _ScheduledVadStream:
+    """VAD double firing scripted events after N pushed frames."""
+
+    def __init__(self, schedule):
+        # schedule: list of (after_pushed_frames, VADEventType)
+        self._schedule = list(schedule)
+        self.pushed = 0
+
+    def push_frame(self, _frame):
+        self.pushed += 1
+
+    def end_input(self):
+        pass
+
+    async def aclose(self):
+        pass
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        while True:
+            if not self._schedule:
+                await asyncio.Event().wait()  # block until cancelled
+            after, ev_type = self._schedule[0]
+            if self.pushed >= after:
+                self._schedule.pop(0)
+                return _make_vad_event(ev_type)
+            await asyncio.sleep(0)
+
+
+class TestCommitGate:
+    """vLLM silently drops a commit sent while the previous segment's
+    generation is still running ("Generation already in progress, ignoring
+    commit") — the segment then never streams, or loses its transcription.done
+    entirely. Opening commits must wait for the previous segment's done."""
+
+    _RELEASE_MARKER = {"type": "_test_done_released"}
+
+    def _wire(self, agent, frames, script):
+        """Wire agent to a scripted WS; returns (participant, stream, sent).
+
+        script: list of (condition, message, mark) — receive() serves each
+        message once its condition (over `sent`) holds; mark=True appends
+        _RELEASE_MARKER to `sent` first, recording the release moment in the
+        send/receive order.
+        """
+        participant = MagicMock(spec=rtc.RemoteParticipant)
+        participant.identity = "user_gate"
+
+        sent: list[dict] = []
+
+        async def _send_json(data):
+            sent.append(data)
+            await asyncio.sleep(0)
+
+        closed_msg = MagicMock()
+        closed_msg.type = aiohttp.WSMsgType.CLOSED
+        script_iter = iter(script)
+
+        async def _receive(*args, **kwargs):
+            try:
+                cond, msg, mark = next(script_iter)
+            except StopIteration:
+                return closed_msg
+            while not cond():
+                await asyncio.sleep(0)
+            if mark:
+                sent.append(dict(self._RELEASE_MARKER))
+            return msg
+
+        mock_ws = AsyncMock()
+        mock_ws.receive = _receive
+        mock_ws.send_json = _send_json
+        cm = AsyncMock()
+        cm.__aenter__ = AsyncMock(return_value=mock_ws)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        mock_session = MagicMock()
+        mock_session.ws_connect = MagicMock(return_value=cm)
+        agent._http_session = mock_session
+
+        audio_events = [MagicMock(frame=f) for f in frames]
+        mock_stream = AsyncMock()
+        mock_stream.__aiter__.return_value = iter(audio_events)
+        mock_stream.aclose = AsyncMock()
+
+        return participant, mock_stream, sent
+
+    @staticmethod
+    def _openers(sent):
+        return [
+            i
+            for i, m in enumerate(sent)
+            if m.get("type") == "input_audio_buffer.commit" and "final" not in m
+        ]
+
+    @staticmethod
+    def _closers(sent):
+        return [
+            i
+            for i, m in enumerate(sent)
+            if m.get("type") == "input_audio_buffer.commit" and m.get("final") is True
+        ]
+
+    def _marker_index(self, sent):
+        return next(i for i, m in enumerate(sent) if m == self._RELEASE_MARKER)
+
+    async def test_opener_waits_for_previous_done_and_loses_no_audio(self, monkeypatch):
+        """
+        Regression for the dropped-commit degradation: after a max-buffer
+        split, the reopen's opening commit must NOT be sent until the previous
+        segment's transcription.done has been read — vLLM ignores commits
+        during an in-flight generation, which cost the reopened segment its
+        streaming (and, on a swallowed closer, its FINAL). The audio arriving
+        during the wait must be buffered and replayed, not dropped.
+        """
+        import providers.voxtral_realtime as vr
+
+        monkeypatch.setattr(vr, "_MAX_BUFFER_DURATION_S", 0.015)
+
+        vad_stream = _ScheduledVadStream([(1, agents_vad.VADEventType.START_OF_SPEECH)])
+        mock_vad = MagicMock()
+        mock_vad.stream.return_value = vad_stream
+        agent = VoxtralRealtimeSttAgent(_make_config(), vad=mock_vad)
+
+        frames = [_make_audio_frame(amplitude=100 + i) for i in range(8)]
+
+        # Hold segment 1's transcription until well after the split close
+        # (6 frames pushed), so an ungated reopen would fire first.
+        sent_holder: dict = {}
+
+        def _cond_done1():
+            sent = sent_holder["sent"]
+            return vad_stream.pushed >= 6 and self._closers(sent)
+
+        def _cond_seg2():
+            return len(self._openers(sent_holder["sent"])) >= 2
+
+        script = [
+            (lambda: True, _text_ws_msg({"type": "session.created"}), False),
+            (
+                _cond_done1,
+                _text_ws_msg({"type": "transcription.delta", "delta": "hello"}),
+                True,
+            ),
+            (
+                lambda: True,
+                _text_ws_msg({"type": "transcription.done", "text": "hello"}),
+                False,
+            ),
+            (
+                _cond_seg2,
+                _text_ws_msg({"type": "transcription.delta", "delta": "world"}),
+                False,
+            ),
+            (
+                lambda: True,
+                _text_ws_msg({"type": "transcription.done", "text": "world"}),
+                False,
+            ),
+        ]
+
+        participant, mock_stream, sent2 = self._wire(agent, frames, script)
+        sent_holder["sent"] = sent2
+
+        final = []
+        agent.on("final_transcript", lambda **kw: final.append(kw))
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
+        ):
+            await asyncio.wait_for(
+                agent._run_transcription_pipeline(participant, MagicMock(), "en"),
+                timeout=5.0,
+            )
+        await asyncio.sleep(0)
+
+        openers = self._openers(sent2)
+        assert len(openers) >= 2, f"expected a reopen, got {len(openers)} opener(s)"
+        marker = self._marker_index(sent2)
+        assert openers[1] > marker, (
+            "the reopen's opening commit must be deferred until the previous "
+            "segment's transcription.done has been received — an earlier "
+            "commit is silently dropped by vLLM"
+        )
+
+        # No audio lost while gated: the frames that arrived while the opener
+        # was deferred (the gate window right after the split close) must be
+        # replayed contiguously into the reopened segment.
+        segments = _segments_from_sent(sent2)
+        assert len(segments) >= 2
+        gated_audio = b"".join(f.data for f in frames[2:5])
+        assert gated_audio in segments[1], (
+            "audio arriving while the opener was gated must be buffered and "
+            "replayed into the reopened segment, not dropped"
+        )
+
+        texts = [kw["event"].alternatives[0].text for kw in final]
+        assert texts == ["hello", "world"]
+
+    async def test_utterance_ending_while_gated_is_still_sent(self):
+        """
+        A short utterance that starts AND ends while the previous segment's
+        done is outstanding must still be sent (open + close) once the server
+        frees up — not stay buffered forever or be dropped.
+        """
+        vad_stream = _ScheduledVadStream(
+            [
+                (1, agents_vad.VADEventType.START_OF_SPEECH),
+                (3, agents_vad.VADEventType.END_OF_SPEECH),
+                (6, agents_vad.VADEventType.START_OF_SPEECH),
+                (9, agents_vad.VADEventType.END_OF_SPEECH),
+            ]
+        )
+        mock_vad = MagicMock()
+        mock_vad.stream.return_value = vad_stream
+        agent = VoxtralRealtimeSttAgent(_make_config(), vad=mock_vad)
+
+        frames = [_make_audio_frame(amplitude=100 + i) for i in range(16)]
+
+        sent_holder: dict = {}
+
+        def _cond_done1():
+            sent = sent_holder["sent"]
+            return vad_stream.pushed >= 12 and self._closers(sent)
+
+        def _cond_seg2():
+            return len(self._openers(sent_holder["sent"])) >= 2
+
+        script = [
+            (lambda: True, _text_ws_msg({"type": "session.created"}), False),
+            (
+                _cond_done1,
+                _text_ws_msg({"type": "transcription.delta", "delta": "hello"}),
+                True,
+            ),
+            (
+                lambda: True,
+                _text_ws_msg({"type": "transcription.done", "text": "hello"}),
+                False,
+            ),
+            (
+                _cond_seg2,
+                _text_ws_msg({"type": "transcription.delta", "delta": "world"}),
+                False,
+            ),
+            (
+                lambda: True,
+                _text_ws_msg({"type": "transcription.done", "text": "world"}),
+                False,
+            ),
+        ]
+
+        participant, mock_stream, sent = self._wire(agent, frames, script)
+        sent_holder["sent"] = sent
+
+        final = []
+        agent.on("final_transcript", lambda **kw: final.append(kw))
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
+        ):
+            await asyncio.wait_for(
+                agent._run_transcription_pipeline(participant, MagicMock(), "en"),
+                timeout=5.0,
+            )
+        await asyncio.sleep(0)
+
+        openers = self._openers(sent)
+        closers = self._closers(sent)
+        assert len(openers) == 2 and len(closers) == 2, (
+            f"gated utterance must be opened and closed once the server frees "
+            f"up — got {len(openers)} openers / {len(closers)} closers"
+        )
+        marker = self._marker_index(sent)
+        assert openers[1] > marker, (
+            "utterance 2's opener must wait for utterance 1's done"
+        )
+        texts = [kw["event"].alternatives[0].text for kw in final]
+        assert texts == ["hello", "world"]
+
+    async def test_gate_timeout_resyncs_and_opens(self, monkeypatch, caplog):
+        """
+        When a transcription.done never arrives (swallowed closing commit,
+        already-desynced session), the gate must not wedge the pipeline: after
+        the timeout it resyncs the outstanding counter and opens ungated —
+        degrading to the pre-gate behavior instead of buffering forever.
+        """
+        import providers.voxtral_realtime as vr
+
+        monkeypatch.setattr(vr, "_MAX_BUFFER_DURATION_S", 0.015)
+        monkeypatch.setattr(vr, "_OPEN_GATE_TIMEOUT_S", 0.0)
+
+        vad_stream = _ScheduledVadStream([(1, agents_vad.VADEventType.START_OF_SPEECH)])
+        mock_vad = MagicMock()
+        mock_vad.stream.return_value = vad_stream
+        agent = VoxtralRealtimeSttAgent(_make_config(), vad=mock_vad)
+
+        frames = [_make_audio_frame(amplitude=100 + i) for i in range(8)]
+        script = [
+            (lambda: True, _text_ws_msg({"type": "session.created"}), False),
+            # No transcription events ever — the done is lost.
+        ]
+        participant, mock_stream, sent = self._wire(agent, frames, script)
+
+        with (
+            patch(
+                "providers.voxtral_realtime.rtc.AudioStream",
+                return_value=mock_stream,
+            ),
+            caplog.at_level("WARNING"),
+        ):
+            await asyncio.wait_for(
+                agent._run_transcription_pipeline(participant, MagicMock(), "en"),
+                timeout=5.0,
+            )
+
+        assert "open gate timed out" in caplog.text
+        assert len(self._openers(sent)) >= 2, (
+            "after the gate timeout the next segment must still open"
+        )
+
+
 # ── Failure recovery and teardown flush ────────────────────────────────────────
 
 

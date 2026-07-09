@@ -58,6 +58,16 @@ _RETRY_DELAY_MAX_S = 30.0
 # transcription.done of the final segment before tearing the reader down;
 # cancelling it immediately would drop the tail utterance's FINAL.
 _FINAL_DRAIN_TIMEOUT_S = 3.0
+# vLLM's realtime handler runs one generation per connection and SILENTLY
+# drops any commit that arrives while the previous segment's generation is
+# still running ("Generation already in progress, ignoring commit"). A dropped
+# opener means the segment never streams (no interims, late batched FINAL); a
+# dropped closer loses the segment's transcription.done entirely and desyncs
+# the FIFO pairing. Openers are therefore gated until the previous segment's
+# done has been read, buffering audio locally meanwhile. The timeout bounds
+# the wait when a done never arrives (already-desynced session): give up,
+# resync the counter, and open ungated as before.
+_OPEN_GATE_TIMEOUT_S = float(os.getenv("VOXTRAL_OPEN_GATE_TIMEOUT_S", "10.0"))
 
 
 @dataclass
@@ -284,6 +294,12 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
         seg_text = ""
         seg_start: float | None = None
 
+        # Segments opened whose transcription.done has not been read yet.
+        # Incremented by _writer._open(), decremented by _reader on done.
+        # _writer defers opening commits while this is non-zero — vLLM ignores
+        # commits sent during an in-flight generation (see _OPEN_GATE_TIMEOUT_S).
+        outstanding = 0
+
         def _pop_segment_start(context: str) -> float:
             if segment_starts:
                 return segment_starts.popleft()
@@ -331,7 +347,7 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
             emitted by the server while audio is still streaming are consumed
             in real time rather than buffered and replayed after each commit.
             """
-            nonlocal seg_text, seg_start
+            nonlocal seg_text, seg_start, outstanding
 
             while True:
                 try:
@@ -386,6 +402,9 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                         _emit_transcript(False, seg_text, seg_start)
 
                 elif msg_type == "transcription.done":
+                    # The server finished this segment's generation; the writer
+                    # may open the next segment's request now.
+                    outstanding = max(0, outstanding - 1)
                     # Prefer accumulated delta text over done.text: the realtime
                     # API sends content via deltas; done.text may be empty or absent.
                     server_text = data.get("text", "").strip()
@@ -486,6 +505,7 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
             #   buffer holds only the current utterance, so the longer replay
             #   is safe and gives the reopened request the left-context the
             #   model needs (see _SPLIT_OVERLAP_S).
+            nonlocal outstanding
             onset_max = (
                 int(min(_VAD_PREROLL_S, _VAD_MIN_SILENCE_S) * _TARGET_SAMPLE_RATE) * 2
             )
@@ -497,6 +517,17 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
             open_secs = 0.0  # duration of the current open segment
             stream_open = False
             normalizer = _AudioNormalizer()  # stateful: one per audio stream
+            # Commit gate (see _OPEN_GATE_TIMEOUT_S): while the previous
+            # segment's transcription.done is outstanding, an opening commit
+            # would be silently ignored by vLLM, so it is deferred. gate_buf
+            # captures the lead-in plus all audio arriving during the wait and
+            # becomes the eventual _open() replay — the segment starts a
+            # little later but loses nothing.
+            gated = False
+            gate_buf: bytearray | None = None
+            gate_deadline = 0.0
+            pending_end = False  # END_OF_SPEECH arrived while gated
+            loop = asyncio.get_running_loop()
 
             async def _append(data: bytes) -> None:
                 await ws.send_json(
@@ -512,22 +543,32 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                     await _append(pending[:chunk_size])
                     pending = pending[chunk_size:]
 
-            async def _open() -> None:
-                """Open a streaming request and replay the captured lead-in."""
-                nonlocal stream_open, pending, open_secs, split_reopen
-                commit_event.clear()  # discard any stale END from a prior segment
+            def _take_lead_in() -> bytes:
+                """Consume the rolling buffer's tail as a new segment's lead-in."""
+                nonlocal split_reopen
                 limit = split_max if split_reopen else onset_max
                 split_reopen = False
-                replay = (
+                lead = (
                     bytes(preroll[max(0, len(preroll) - limit) :]) if limit > 0 else b""
                 )
                 preroll.clear()
+                return lead
+
+            async def _open(replay: bytes) -> None:
+                """Open a streaming request and replay the captured lead-in."""
+                nonlocal stream_open, pending, open_secs, outstanding
+                commit_event.clear()  # discard any stale END from a prior segment
                 # Record this segment's start (backdated by the replayed lead-in)
                 # for the reader to pair with the segment's transcription events.
                 replay_secs = len(replay) / (_TARGET_SAMPLE_RATE * 2)
                 segment_starts.append(time.time() - open_time - replay_secs)
                 await ws.send_json({"type": "input_audio_buffer.commit"})
+                outstanding += 1
                 stream_open = True
+                # The replay does not count toward the max-buffer cap: it is
+                # bounded on its own (lead-in caps, gate timeout), and counting
+                # it would make a long gated replay close the segment the
+                # moment it opens.
                 open_secs = 0.0
                 if replay:
                     pending += replay
@@ -566,22 +607,62 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
 
                     resampled = normalizer.process(frame)
 
-                    # An END arriving while no request is open means the
-                    # cap-split utterance finished before the reopen (or a
-                    # prior segment's END is stale): whatever opens next is a
-                    # fresh onset, not a split continuation.
+                    # An END arriving while no request is open: if a gated
+                    # segment is waiting, the utterance finished before the
+                    # server freed up — remember to close it right after it
+                    # opens. Otherwise it is stale (cap-split utterance ended
+                    # before the reopen): whatever opens next is a fresh
+                    # onset, not a split continuation.
                     if not stream_open and commit_event.is_set():
                         commit_event.clear()
-                        split_reopen = False
+                        if gated:
+                            pending_end = True
+                        else:
+                            split_reopen = False
 
-                    # Open a request as soon as the VAD reports speech.
-                    if is_in_speech and not stream_open:
-                        await _open()
+                    # Open a request as soon as the VAD reports speech — but
+                    # only once the server has finished the previous segment's
+                    # generation; a commit sent earlier would be silently
+                    # ignored. While deferred, audio accumulates in gate_buf.
+                    if not stream_open and (is_in_speech or gated):
+                        if outstanding == 0:
+                            replay = (
+                                bytes(gate_buf)
+                                if gate_buf is not None
+                                else _take_lead_in()
+                            )
+                            gate_buf = None
+                            gated = False
+                            await _open(replay)
+                            if pending_end:
+                                pending_end = False
+                                # The gated utterance already ended; close it
+                                # now — unless the speaker has resumed, in
+                                # which case keep streaming and let the next
+                                # END close the merged segment.
+                                if not is_in_speech:
+                                    await _close()
+                        elif not gated:
+                            gated = True
+                            gate_deadline = loop.time() + _OPEN_GATE_TIMEOUT_S
+                            gate_buf = bytearray(_take_lead_in())
+                        elif loop.time() >= gate_deadline:
+                            # The done never arrived (lost closing commit or
+                            # event desync); waiting longer only buffers more
+                            # audio. Resync and open ungated on the next frame.
+                            logging.warning(
+                                f"Voxtral: open gate timed out for "
+                                f"{participant.identity} with {outstanding} "
+                                f"transcription(s) outstanding — resyncing"
+                            )
+                            outstanding = 0
 
                     if stream_open:
                         pending += resampled
                         open_secs += frame_duration
                         await _flush_pending()
+                    elif gated:
+                        gate_buf += resampled
 
                     # Keep a bounded rolling buffer of the most recent audio,
                     # whether idle or open. _open() replays its tail as the
@@ -612,10 +693,19 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                 # request would be dropped without its closing commit — losing
                 # the utterance's FINAL and leaving the server request dangling
                 # (abrupt drops are a known vLLM realtime crash trigger).
-                # Best-effort close before propagating the cancellation.
-                if stream_open:
+                # Best-effort close before propagating the cancellation. A
+                # gated segment never sent its opener, so open-and-close it —
+                # the server may still be mid-generation and drop the opener,
+                # but that is no worse than losing the utterance outright.
+                if stream_open or (gated and gate_buf):
                     try:
-                        await asyncio.wait_for(_close(), timeout=1.0)
+
+                        async def _cancel_flush() -> None:
+                            if not stream_open:
+                                await _open(bytes(gate_buf))
+                            await _close()
+
+                        await asyncio.wait_for(_cancel_flush(), timeout=1.0)
                     except Exception:
                         logging.debug(
                             f"Voxtral: cancel-time flush failed for "
@@ -624,8 +714,14 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                 raise
 
             # End of stream: drain the resampler tail and flush any open request.
+            # A gated segment's opener was deferred the whole time; send it now,
+            # best-effort, so the buffered utterance still gets transcribed.
             if stream_open:
                 pending += normalizer.flush()
+                await _close()
+            elif gated and gate_buf:
+                gate_buf += normalizer.flush()
+                await _open(bytes(gate_buf))
                 await _close()
             vad_stream.end_input()
 
