@@ -5,6 +5,10 @@ Intermediate pre-release changes will only be registered *separately* in their
 respective tag's CHANGELOG.
 Final releases will consolidate all intermediate changes in chronological order.
 
+## UNRELEASED
+
+* build(docker): add LOG_LEVEL env var to control the container's log level
+
 ## v0.3.0
 
 * feat(tests): add unit and integration tests with pytest

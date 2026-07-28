@@ -96,6 +96,14 @@ Run:
 docker run --network host --rm -it --env-file .env bbb-livekit-stt
 ```
 
+The container's log level is controlled by the `LOG_LEVEL` env var (`TRACE`,
+`DEBUG`, `INFO`, `WARN`, `ERROR` or `CRITICAL`; defaults to `INFO`). To run the
+agent with debug logging:
+
+```bash
+docker run --network host --rm -it --env-file .env -e LOG_LEVEL=DEBUG bbb-livekit-stt
+```
+
 Pre-built images are available via GitHub Container Registry as well.
 
 ### Development
