@@ -9,6 +9,10 @@ dependencies = [
     "python-dotenv~=1.1.1",
     "redis~=6.4.0",
     "nest-asyncio~=1.6.0",
+    # Imported directly by providers/openai.py. They also come in transitively
+    # via livekit-agents, so keep the bounds loose enough not to fight its own.
+    "aiohttp~=3.12",
+    "numpy~=2.2",
 ]
 
 [dependency-groups]

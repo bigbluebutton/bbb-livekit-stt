@@ -12,6 +12,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 * refactor: extract BaseSttAgent and BaseSttConfig into providers/base.py
 * refactor: move GladiaConfig to providers package, delete old agent module
 * build(docker): add LOG_LEVEL env var to control the container's log level
+* build: declare aiohttp and numpy as direct dependencies
 
 ## v0.3.0
 
