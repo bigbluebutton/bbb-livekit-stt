@@ -6,7 +6,7 @@ as their audio bridge.
 Supported STT engines:
 
 - **Gladia** — via the official [LiveKit Gladia plugin](https://docs.livekit.io/agents/integrations/stt/gladia/) (default)
-- **OpenAI** — via the [LiveKit OpenAI plugin](https://docs.livekit.io/agents/models/stt/openai/); supports the official OpenAI API and any OpenAI-compatible endpoint
+- **OpenAI** — via a direct REST client against `/v1/audio/transcriptions`; supports the official OpenAI API and any OpenAI-compatible endpoint
 
 ## Getting Started
 
@@ -58,7 +58,9 @@ Supported STT engines:
 
     Feel free to check `.env.example` for any other configurations of interest.
 
-    **All options ingested by the Gladia and OpenAI STT plugins are exposed via env vars**.
+    **All options ingested by the Gladia STT plugin are exposed via env vars**. The
+    OpenAI provider takes `OPENAI_API_KEY`, `OPENAI_STT_MODEL` and `OPENAI_BASE_URL`
+    (see below).
 
 ### Running
 
@@ -131,8 +133,17 @@ OPENAI_BASE_URL=http://your-server:8000
 OPENAI_STT_MODEL=your-model-name
 ```
 
-> **Note**: OpenAI STT does not support real-time translation. Only the original
-> transcript language is returned, matching the user's BBB speech locale.
+Some caveats apply to this provider:
+
+- It is not a streaming provider. Audio is segmented locally by silence detection
+  and each segment is posted to `/v1/audio/transcriptions`, so transcripts arrive
+  once an utterance ends rather than continuously.
+- It does not support real-time translation. Only the original transcript
+  language is returned, matching the user's BBB speech locale.
+- The `auto` speech locale is not usable with it. The agent requests
+  `response_format=json`, whose payload carries only the transcribed text, so
+  there is no detected language to map back to a BBB locale and the transcript is
+  discarded with a warning. Set an explicit locale in BBB when using OpenAI STT.
 
 ### Development
 
