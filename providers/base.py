@@ -2,29 +2,62 @@ import asyncio
 import logging
 import time
 
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Dict
+
 from livekit import rtc
 from livekit.agents import (
     AutoSubscribe,
     JobContext,
     stt,
 )
-from livekit.plugins.gladia import STT as GladiaSTT
 
-from config import GladiaConfig
 from events import EventEmitter
 
 
-class GladiaSttAgent(EventEmitter):
-    def __init__(self, config: GladiaConfig):
+@dataclass
+class BaseSttConfig:
+    interim_results: bool | None = None
+
+    def to_stt_kwargs(self) -> dict:
+        """Provider-specific kwargs for the LiveKit STT plugin. Subclasses implement."""
+        raise NotImplementedError
+
+
+class BaseSttAgent(EventEmitter, ABC):
+    def __init__(self, config: BaseSttConfig):
         super().__init__()
         self.config = config
-        self.stt = GladiaSTT(**config.to_dict())
         self.ctx: JobContext | None = None
         self.room: rtc.Room | None = None
         self.processing_info = {}
         self.participant_settings = {}
         self.open_time = time.time()
         self._shutdown = asyncio.Event()
+
+    @property
+    def translation_lang_map(self) -> Dict[str, str]:
+        """Map provider language codes to BBB locales. Override for translation support."""
+        return {}
+
+    @abstractmethod
+    def _create_stt_stream(self, locale: str | None) -> stt.SpeechStream:
+        """Create an STT stream for the given locale. Provider subclasses implement.
+
+        A None locale means the BBB user asked for auto-detection: providers
+        must omit the language so the backend detects it server-side.
+        """
+        ...
+
+    @abstractmethod
+    def _update_stream_locale(self, user_id: str, locale: str):
+        """Apply a locale change to an active stream. Provider subclasses implement."""
+        ...
+
+    def _should_emit(self, event: stt.SpeechEvent) -> bool:
+        """Filter events before emission. Override for provider-specific filtering."""
+        return True
 
     async def start(self, ctx: JobContext):
         self.ctx = ctx
@@ -76,12 +109,8 @@ class GladiaSttAgent(EventEmitter):
             )
             return
 
-        gladia_locale = self._sanitize_locale(locale)
-        stt_stream = (
-            self.stt.stream(language=gladia_locale)
-            if gladia_locale
-            else self.stt.stream()
-        )
+        sanitized_locale = self._sanitize_locale(locale)
+        stt_stream = self._create_stt_stream(sanitized_locale)
         task = asyncio.create_task(
             self._run_transcription_pipeline(participant, track, stt_stream)
         )
@@ -107,12 +136,7 @@ class GladiaSttAgent(EventEmitter):
 
         if user_id in self.processing_info:
             logging.info(f"Updating locale to '{locale}' for user {user_id}.")
-            stream = self.processing_info[user_id]["stream"]
-            gladia_locale = self._sanitize_locale(locale)
-            if gladia_locale:
-                stream.update_options(languages=[gladia_locale])
-            else:
-                stream.update_options(languages=[])
+            self._update_stream_locale(user_id, locale)
         else:
             logging.warning(
                 f"Won't update locale, no active transcription for user {user_id}."
@@ -177,16 +201,16 @@ class GladiaSttAgent(EventEmitter):
         return None
 
     def _sanitize_locale(self, locale: str) -> str | None:
-        # Gladia only accepts ISO 639-1 locales (e.g. "en")
+        # STT providers typically accept ISO 639-1 locales (e.g. "en")
         # BBB uses <ISO 639-1>-<ISO 3166-1> format (e.g. "en-US")
-        # Sanitization here is to ensure we use Gladia's format.
-        # "auto" is not a valid ISO language code — returning None omits the
-        # language parameter so Gladia falls back to server-side auto-detection.
-        gladia_locale = locale.split("-")[0].lower()
-        if gladia_locale == "auto":
+        # Sanitization here is to ensure we use the provider's format.
+        # "auto" is not a valid ISO language code — returning None lets the
+        # provider fall back to server-side auto-detection.
+        sanitized = locale.split("-")[0].lower()
+        if sanitized == "auto":
             return None
 
-        return gladia_locale
+        return sanitized
 
     async def _run_transcription_pipeline(
         self,
@@ -206,6 +230,8 @@ class GladiaSttAgent(EventEmitter):
 
         async def process_stt_task():
             async for event in stt_stream:
+                if not self._should_emit(event):
+                    continue
                 if event.type == stt.SpeechEventType.FINAL_TRANSCRIPT:
                     self.emit(
                         "final_transcript",

@@ -7,6 +7,10 @@ Final releases will consolidate all intermediate changes in chronological order.
 
 ## UNRELEASED
 
+* feat(openai): add OpenAI STT provider support (official and compatible endpoints)
+* feat: add GladiaSttAgent provider and factory
+* refactor: extract BaseSttAgent and BaseSttConfig into providers/base.py
+* refactor: move GladiaConfig to providers package, delete old agent module
 * build(docker): add LOG_LEVEL env var to control the container's log level
 
 ## v0.3.0

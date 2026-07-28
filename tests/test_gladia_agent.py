@@ -7,13 +7,12 @@ from livekit import rtc
 from livekit.agents import stt
 from livekit.plugins.gladia import STT as GladiaSTT
 
-from config import GladiaConfig
-from gladia_stt_agent import GladiaSttAgent
+from providers.gladia import GladiaConfig, GladiaSttAgent
 
 
 def _make_agent(interim_results=None, **kwargs):
     config = GladiaConfig(api_key="fake-key", interim_results=interim_results, **kwargs)
-    with patch("gladia_stt_agent.GladiaSTT", spec=GladiaSTT):
+    with patch("providers.gladia.GladiaSTT", spec=GladiaSTT):
         agent = GladiaSttAgent(config)
     return agent
 
@@ -282,7 +281,7 @@ class TestStartTranscriptionForUser:
         participant = _make_participant("user_1", audio_track=mock_track)
         agent = _make_agent_with_room(participants={"pid": participant})
 
-        with patch("gladia_stt_agent.rtc.AudioStream"):
+        with patch("providers.base.rtc.AudioStream"):
             agent.start_transcription_for_user("user_1", "en-US", "gladia")
 
             assert "user_1" in agent.processing_info
@@ -305,7 +304,7 @@ class TestStartTranscriptionForUser:
         participant = _make_participant("user_1", audio_track=mock_track)
         agent = _make_agent_with_room(participants={"pid": participant})
 
-        with patch("gladia_stt_agent.rtc.AudioStream"):
+        with patch("providers.base.rtc.AudioStream"):
             agent.start_transcription_for_user("user_1", "pt-BR", "gladia")
             agent.stt.stream.assert_called_once_with(language="pt")
 
@@ -321,7 +320,7 @@ class TestStartTranscriptionForUser:
         participant = _make_participant("user_1", audio_track=mock_track)
         agent = _make_agent_with_room(participants={"pid": participant})
 
-        with patch("gladia_stt_agent.rtc.AudioStream"):
+        with patch("providers.base.rtc.AudioStream"):
             agent.start_transcription_for_user("user_1", "auto", "gladia")
             agent.stt.stream.assert_called_once_with()
 
@@ -350,7 +349,7 @@ class TestRunTranscriptionPipeline:
             "task": MagicMock(),
         }
 
-        with patch("gladia_stt_agent.rtc.AudioStream", return_value=mock_audio_stream):
+        with patch("providers.base.rtc.AudioStream", return_value=mock_audio_stream):
             await agent._run_transcription_pipeline(
                 mock_participant, mock_track, mock_stt_stream
             )
@@ -377,7 +376,7 @@ class TestRunTranscriptionPipeline:
         emitted = []
         agent.on("final_transcript", lambda **kw: emitted.append(kw))
 
-        with patch("gladia_stt_agent.rtc.AudioStream", return_value=mock_audio_stream):
+        with patch("providers.base.rtc.AudioStream", return_value=mock_audio_stream):
             await agent._run_transcription_pipeline(
                 mock_participant, mock_track, mock_stt_stream
             )
@@ -405,7 +404,7 @@ class TestRunTranscriptionPipeline:
         emitted = []
         agent.on("interim_transcript", lambda **kw: emitted.append(kw))
 
-        with patch("gladia_stt_agent.rtc.AudioStream", return_value=mock_audio_stream):
+        with patch("providers.base.rtc.AudioStream", return_value=mock_audio_stream):
             await agent._run_transcription_pipeline(
                 mock_participant, mock_track, mock_stt_stream
             )
@@ -431,7 +430,7 @@ class TestRunTranscriptionPipeline:
         emitted = []
         agent.on("interim_transcript", lambda **kw: emitted.append(kw))
 
-        with patch("gladia_stt_agent.rtc.AudioStream", return_value=mock_audio_stream):
+        with patch("providers.base.rtc.AudioStream", return_value=mock_audio_stream):
             await agent._run_transcription_pipeline(
                 mock_participant, mock_track, mock_stt_stream
             )
@@ -457,7 +456,7 @@ class TestRunTranscriptionPipeline:
             "task": MagicMock(),
         }
 
-        with patch("gladia_stt_agent.rtc.AudioStream", return_value=mock_audio_stream):
+        with patch("providers.base.rtc.AudioStream", return_value=mock_audio_stream):
             await agent._run_transcription_pipeline(
                 mock_participant, mock_track, mock_stt_stream
             )

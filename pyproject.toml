@@ -25,7 +25,7 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.coverage.run]
-source = ["config", "events", "gladia_stt_agent", "redis_manager", "utils"]
+source = ["config", "events", "providers", "redis_manager", "utils"]
 omit = ["tests/*"]
 
 [tool.coverage.report]

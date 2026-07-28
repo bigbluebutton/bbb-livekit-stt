@@ -3,7 +3,6 @@ import os
 import pytest
 
 from config import (
-    GladiaConfig,
     _get_bool_env,
     _get_float_env,
     _get_json_env,
@@ -11,6 +10,8 @@ from config import (
     _get_map_env,
     redact_config_values,
 )
+from providers.gladia import GladiaConfig
+from providers.openai import OpenAiConfig
 
 
 class TestGetBoolEnv:
@@ -101,7 +102,7 @@ class TestGetMapEnv:
         assert result == {"en": "en-AU", "pt": "pt-PT"}
 
 
-class TestGladiaConfigToDict:
+class TestGladiaConfigToSttKwargs:
     def test_excludes_optional_none_fields(self):
         config = GladiaConfig(
             api_key="test-key",
@@ -110,7 +111,7 @@ class TestGladiaConfigToDict:
             code_switching=None,
             energy_filter=None,
         )
-        result = config.to_dict()
+        result = config.to_stt_kwargs()
         assert "interim_results" not in result
         assert "languages" not in result
         assert "code_switching" not in result
@@ -123,7 +124,7 @@ class TestGladiaConfigToDict:
             languages=["en", "fr"],
             code_switching=False,
         )
-        result = config.to_dict()
+        result = config.to_stt_kwargs()
         assert result["api_key"] == "test-key"
         assert result["interim_results"] is True
         assert result["languages"] == ["en", "fr"]
@@ -223,3 +224,33 @@ class TestGladiaConfigDefaults:
         config = GladiaConfig()
         assert config.min_confidence_interim == pytest.approx(0.2)
         assert config.min_confidence_final == pytest.approx(0.5)
+
+
+class TestOpenAiConfigDefaults:
+    @pytest.fixture(autouse=True)
+    def _clean_openai_env(self, monkeypatch):
+        """Remove all OPENAI_* env vars so dataclass defaults are exercised."""
+        for key in list(os.environ):
+            if key.startswith("OPENAI_"):
+                monkeypatch.delenv(key, raising=False)
+
+    def test_model_defaults_to_gpt4o_transcribe(self):
+        assert OpenAiConfig().model == "gpt-4o-transcribe"
+
+    def test_api_key_defaults_to_none(self):
+        assert OpenAiConfig().api_key is None
+
+    def test_base_url_defaults_to_none(self):
+        assert OpenAiConfig().base_url is None
+
+    def test_model_overridden_by_env_var(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_STT_MODEL", "whisper-1")
+        assert OpenAiConfig().model == "whisper-1"
+
+    def test_base_url_overridden_by_env_var(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://localhost:8000")
+        assert OpenAiConfig().base_url == "http://localhost:8000"
+
+    def test_api_key_overridden_by_env_var(self, monkeypatch):
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        assert OpenAiConfig().api_key == "sk-test"
