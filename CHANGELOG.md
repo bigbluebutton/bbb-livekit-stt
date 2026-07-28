@@ -11,6 +11,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 * feat: add GladiaSttAgent provider and factory
 * refactor: extract BaseSttAgent and BaseSttConfig into providers/base.py
 * refactor: move GladiaConfig to providers package, delete old agent module
+* fix: drop transcripts with no resolvable BBB locale instead of publishing a null one
 * build(docker): add LOG_LEVEL env var to control the container's log level
 * build: declare aiohttp and numpy as direct dependencies
 
