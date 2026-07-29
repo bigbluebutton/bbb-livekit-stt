@@ -13,6 +13,9 @@ dependencies = [
     # via livekit-agents, so keep the bounds loose enough not to fight its own.
     "aiohttp~=3.12",
     "numpy~=2.2",
+    # Imported directly by metrics.py. Also transitive via livekit-agents'
+    # telemetry module, whose /metrics endpoint serves our collectors.
+    "prometheus-client~=0.22",
 ]
 
 [dependency-groups]
@@ -29,7 +32,7 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.coverage.run]
-source = ["config", "events", "providers", "redis_manager", "utils"]
+source = ["config", "events", "metrics", "providers", "redis_manager", "utils"]
 omit = ["tests/*"]
 
 [tool.coverage.report]
