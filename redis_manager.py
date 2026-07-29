@@ -21,7 +21,13 @@ class RedisManager:
         self.pub_client = None
         self.sub_client = None
 
-    async def connect(self):
+    async def connect(self) -> bool:
+        """Connect the pub and sub clients. Returns False on failure.
+
+        Failure is not raised: the agent still has useful work to do reading the
+        room. But the caller must be able to observe it, because a failed connect
+        means every transcript is published nowhere.
+        """
         try:
             logging.debug(f"Connecting to Redis at {self.host}:{self.port}")
             self.pub_client = redis.Redis(
@@ -33,10 +39,12 @@ class RedisManager:
             await self.pub_client.ping()
             await self.sub_client.ping()
             logging.info("Connected to Redis")
+            return True
         except Exception as e:
             logging.error(f"Failed to connect to Redis: {e}")
             self.pub_client = None
             self.sub_client = None
+            return False
 
     async def publish_update_transcript_pub_msg(
         self,
@@ -47,10 +55,10 @@ class RedisManager:
         start: int = 0,
         end: int = 0,
         result: bool = True,
-    ):
+    ) -> bool:
         if not self.pub_client:
             logging.warning("Redis not connected, skipping transcription publish")
-            return
+            return False
 
         message = self._generate_update_transcript_pub_msg(
             meeting_id,
@@ -67,8 +75,10 @@ class RedisManager:
                 self.TO_AKKA_APPS_CHANNEL, json.dumps(message)
             )
             logging.debug(f"Published to Redis: {message}")
+            return True
         except Exception as e:
             logging.error(f"Failed to publish to Redis: {e}")
+            return False
 
     async def listen(self, callback):
         if not self.sub_client:
