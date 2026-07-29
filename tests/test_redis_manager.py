@@ -1,4 +1,6 @@
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from livekit.agents.stt import SpeechData
 
 from config import RedisConfig
 from redis_manager import RedisManager
@@ -113,3 +115,63 @@ class TestPublishUpdateTranscriptPubMsg:
         mock_client.publish.assert_called_once()
         call_args = mock_client.publish.call_args
         assert call_args[0][0] == RedisManager.TO_AKKA_APPS_CHANNEL
+
+
+class TestConnectReturnValue:
+    async def test_returns_true_on_success(self):
+        manager = _make_manager()
+        with patch("redis_manager.redis.Redis") as mock_redis:
+            mock_redis.return_value.ping = AsyncMock()
+            assert await manager.connect() is True
+
+    async def test_returns_false_when_the_connection_fails(self):
+        """connect() swallows the exception and leaves the clients as None, so the
+        agent transcribes into the void. The caller needs to know."""
+        manager = _make_manager()
+        with patch("redis_manager.redis.Redis") as mock_redis:
+            mock_redis.return_value.ping = AsyncMock(
+                side_effect=ConnectionError("refused")
+            )
+            assert await manager.connect() is False
+
+
+class TestPublishReturnValue:
+    async def test_returns_true_on_success(self):
+        manager = _make_manager()
+        manager.pub_client = AsyncMock()
+
+        result = await manager.publish_update_transcript_pub_msg(
+            "meeting-1",
+            "user-1",
+            SpeechData(language="en", text="hello"),
+            "en-US",
+        )
+
+        assert result is True
+
+    async def test_returns_false_when_not_connected(self):
+        manager = _make_manager()
+        manager.pub_client = None
+
+        result = await manager.publish_update_transcript_pub_msg(
+            "meeting-1",
+            "user-1",
+            SpeechData(language="en", text="hello"),
+            "en-US",
+        )
+
+        assert result is False
+
+    async def test_returns_false_when_publishing_raises(self):
+        manager = _make_manager()
+        manager.pub_client = AsyncMock()
+        manager.pub_client.publish = AsyncMock(side_effect=ConnectionError("gone"))
+
+        result = await manager.publish_update_transcript_pub_msg(
+            "meeting-1",
+            "user-1",
+            SpeechData(language="en", text="hello"),
+            "en-US",
+        )
+
+        assert result is False
