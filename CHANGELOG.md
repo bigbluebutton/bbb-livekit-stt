@@ -9,13 +9,19 @@ Final releases will consolidate all intermediate changes in chronological order.
 
 * feat(openai): add OpenAI STT provider support (official and compatible endpoints)
 * feat: add GladiaSttAgent provider and factory
+* feat: add Prometheus collectors for the STT agent
+* feat: expose Prometheus metrics behind BBB_STT_PROMETHEUS_PORT
+* feat: instrument session lifecycle across the STT providers
+* feat: instrument transcript publication and discards
 * refactor: extract BaseSttAgent and BaseSttConfig into providers/base.py
 * refactor: move GladiaConfig to providers package, delete old agent module
 * fix: drop transcripts with no resolvable BBB locale instead of publishing a null one
+* fix: report Redis connect and publish failures to callers
 * build(docker): add LOG_LEVEL env var to control the container's log level
 * build: declare aiohttp and numpy as direct dependencies
 * docs: correct how the OpenAI provider reaches the API and list its caveats
 * docs: expand and correct AGENTS.md
+* docs: document Prometheus metrics and their operational caveats
 
 ## v0.3.0
 

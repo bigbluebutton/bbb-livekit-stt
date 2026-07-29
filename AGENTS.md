@@ -49,6 +49,11 @@ dependencies, run the agent, and run tests.
 - **`config.py`** — `RedisConfig` + the `redis_config` singleton, the `stt_provider`
   env var, env-var helpers (`_get_float_env`, `_get_bool_env`, …), and startup
   config redaction. Provider configs live in `providers/`, not here.
+- **`metrics.py`** — Prometheus collectors. `SttMetrics` owns every collector and
+  exposes recording methods; the `stt_metrics` singleton binds to the default
+  registry, which the LiveKit worker's `/metrics` endpoint serves. Takes an
+  injectable `CollectorRegistry` so tests assert real sample values instead of
+  mocking. Must not import from `providers/` — providers import it.
 - **`redis_manager.py`** — async Redis pub/sub. Publishes `UpdateTranscriptPubMsg`
   to `to-akka-apps-redis-channel`; listens on `from-akka-apps-redis-channel` for
   locale and speech-option change events.
@@ -153,6 +158,18 @@ until they pass. Do not add tests for input shapes the callers cannot produce.
   `gladia_config` and `openai_config` in their provider modules. All read env vars
   at import. In tests, set env vars before importing or construct the config
   directly (e.g. `GladiaConfig(api_key="fake-key")`).
+- **Metrics run across processes.** LiveKit runs each job in its own process, so
+  every `Gauge` in `metrics.py` declares `multiprocess_mode="livesum"`, and
+  `PROMETHEUS_MULTIPROC_DIR` must be set as a real env var — `prometheus_client`
+  picks its value class at import time, long before `WorkerOptions` could set it.
+  Passing `prometheus_multiproc_dir` to `WorkerOptions` instead silently drops the
+  worker's own metrics.
+- **Metrics tests need a fresh registry.** Construct `SttMetrics(CollectorRegistry())`
+  per test and read values with `registry.get_sample_value(name, labels)`. Reusing
+  the default registry makes tests order-dependent.
+- **`processing_info` entries require `metrics_locale`.** `stop_transcription_for_user`
+  reads it to decrement the right gauge label. Tests that hand-build entries must
+  include it.
 - **Test patch targets**: patch at the import location — `"providers.gladia.GladiaSTT"`,
   not `"livekit.plugins.gladia.STT"`; `"providers.base.rtc.AudioStream"` for the
   shared audio pipeline, `"providers.openai.rtc.AudioStream"` for OpenAI's own.

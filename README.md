@@ -112,6 +112,71 @@ docker run --network host --rm -it --env-file .env -e LOG_LEVEL=DEBUG bbb-liveki
 
 Pre-built images are available via GitHub Container Registry as well.
 
+### Metrics
+
+The agent exposes Prometheus metrics through the LiveKit worker's built-in
+endpoint. Metrics are **opt-in**: set `BBB_STT_PROMETHEUS_PORT` to enable them.
+
+```bash
+BBB_STT_PROMETHEUS_PORT=8082
+PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus-multiproc
+```
+
+Scrape `http://<host>:8082/metrics`.
+
+`PROMETHEUS_MULTIPROC_DIR` is required, not optional. LiveKit runs each room job
+in its own process, and per-session metrics only reach the endpoint through this
+shared directory. It must be a real environment variable: `prometheus_client`
+decides whether to use multiprocess mode when it is first imported, which happens
+before the worker could set it. The Docker image sets it already.
+
+With Docker:
+
+```bash
+docker run --network host --rm -it --env-file .env \
+  -e BBB_STT_PROMETHEUS_PORT=8082 bbb-livekit-stt
+```
+
+The endpoint also serves LiveKit's own `lk_agents_*` metrics (active jobs, worker
+load, child process count).
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `bbb_stt_active_sessions` | Gauge | `provider`, `locale` | Active transcription sessions, one per subscribed microphone track |
+| `bbb_stt_active_agents` | Gauge | `provider` | Running agents, one per room job |
+| `bbb_stt_session_starts_total` | Counter | `provider` | Sessions successfully started |
+| `bbb_stt_session_start_failures_total` | Counter | `provider`, `reason` | Sessions that could not be established |
+| `bbb_stt_agent_start_failures_total` | Counter | `provider`, `reason` | Agents that could not be established |
+| `bbb_stt_transcripts_total` | Counter | `provider`, `event_type` | Transcripts that passed filtering and were sent to BBB |
+| `bbb_stt_transcripts_discarded_total` | Counter | `provider`, `reason` | Transcripts dropped before publication |
+| `bbb_stt_transcript_confidence` | Histogram | `provider`, `event_type` | Confidence of published transcripts (Gladia only) |
+| `bbb_stt_utterance_duration_seconds` | Histogram | `provider`, `event_type` | Duration of transcribed utterances |
+| `bbb_stt_provider_audio_seconds_total` | Counter | `provider` | Audio seconds processed, as reported by the provider |
+| `bbb_stt_language_detection_mismatch_total` | Counter | `provider` | Transcripts whose language differs from the requested one |
+| `bbb_stt_transcript_publish_failures_total` | Counter | `provider` | Transcripts lost because publishing to Redis failed |
+
+
+Caveats worth knowing:
+- No metric carries meeting or user labels for cardinality reasons.
+  Per-meeting detail is available in the logs.
+- **`reason="no_audio_track"` is usually benign.** BBB routinely sends the
+  speech-locale change before the participant publishes a microphone track, and
+  the session starts moments later. Alert on its rate relative to
+  `bbb_stt_session_starts_total`, not on the raw count.
+- **`bbb_stt_transcripts_total` counts transcripts that were *sent*, not
+  confirmed.** A transcript is counted even when the Redis publish fails, so the
+  confidence histogram does not develop holes during a Redis outage. Subtract
+  `bbb_stt_transcript_publish_failures_total` for what BBB actually received.
+- **A job killed with `SIGKILL` leaves its gauge value behind.** `prometheus_client`
+  drops a dead process's gauge contribution only when `mark_process_dead` is
+  called, and `livekit-agents` never calls it. Clean exits, exceptions and
+  cancellations all decrement correctly; an OOM kill does not. The stale value
+  clears when the worker restarts. LiveKit's own `lk_agents_active_job_count` is
+  affected identically, so `bbb_stt_active_agents` exceeding it indicates leaked
+  series.
+- `bbb_stt_transcript_confidence` is only populated for Gladia as of now. Providers
+  that do not report transcript confidence (e.g.: OpenAI) do not populate this histogram.
+
 ### OpenAI STT provider
 
 Set `STT_PROVIDER=openai` to use OpenAI STT instead of Gladia.
