@@ -10,7 +10,12 @@ from livekit import rtc
 
 from redis_manager import RedisManager
 from providers import create_agent
-from config import get_redacted_app_config, redis_config, stt_provider
+from config import (
+    get_redacted_app_config,
+    metrics_config,
+    redis_config,
+    stt_provider,
+)
 from utils import (
     coerce_min_utterance_length_seconds,
     coerce_partial_utterances,
@@ -262,5 +267,10 @@ async def entrypoint(ctx: JobContext):
 
 
 if __name__ == "__main__":
-    opts = WorkerOptions(entrypoint_fnc=entrypoint)
-    cli.run_app(opts)
+    # Opt-in: without a port the worker starts no /metrics listener.
+    worker_kwargs = {"entrypoint_fnc": entrypoint}
+
+    if metrics_config.prometheus_port is not None:
+        worker_kwargs["prometheus_port"] = metrics_config.prometheus_port
+
+    cli.run_app(WorkerOptions(**worker_kwargs))

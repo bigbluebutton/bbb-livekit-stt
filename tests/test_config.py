@@ -3,8 +3,10 @@ import os
 import pytest
 
 from config import (
+    MetricsConfig,
     _get_bool_env,
     _get_float_env,
+    _get_int_env,
     _get_json_env,
     _get_list_env,
     _get_map_env,
@@ -254,3 +256,28 @@ class TestOpenAiConfigDefaults:
     def test_api_key_overridden_by_env_var(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         assert OpenAiConfig().api_key == "sk-test"
+
+
+class TestGetIntEnv:
+    def test_returns_default_when_unset(self, monkeypatch):
+        monkeypatch.delenv("BBB_TEST_INT", raising=False)
+        assert _get_int_env("BBB_TEST_INT", None) is None
+
+    def test_parses_a_set_value(self, monkeypatch):
+        monkeypatch.setenv("BBB_TEST_INT", "8082")
+        assert _get_int_env("BBB_TEST_INT", None) == 8082
+
+    def test_returns_default_on_an_unparseable_value(self, monkeypatch):
+        monkeypatch.setenv("BBB_TEST_INT", "not-a-port")
+        assert _get_int_env("BBB_TEST_INT", None) is None
+
+
+class TestMetricsConfig:
+    def test_prometheus_port_defaults_to_none(self, monkeypatch):
+        """Exposure is opt-in: an upgrade must not start binding a new socket."""
+        monkeypatch.delenv("BBB_STT_PROMETHEUS_PORT", raising=False)
+        assert MetricsConfig().prometheus_port is None
+
+    def test_prometheus_port_reads_its_env_var(self, monkeypatch):
+        monkeypatch.setenv("BBB_STT_PROMETHEUS_PORT", "8082")
+        assert MetricsConfig().prometheus_port == 8082
