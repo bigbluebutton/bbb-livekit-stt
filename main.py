@@ -10,7 +10,12 @@ from livekit import rtc
 
 from redis_manager import RedisManager
 from providers import create_agent, prewarm_provider
-from config import get_redacted_app_config, redis_config, stt_provider
+from config import (
+    get_redacted_app_config,
+    metrics_config,
+    redis_config,
+    stt_provider,
+)
 from utils import (
     coerce_min_utterance_length_seconds,
     coerce_partial_utterances,
@@ -272,5 +277,9 @@ async def entrypoint(ctx: JobContext):
 
 
 if __name__ == "__main__":
-    opts = WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm)
-    cli.run_app(opts)
+    worker_kwargs = {"entrypoint_fnc": entrypoint, "prewarm_fnc": prewarm}
+
+    if metrics_config.prometheus_port is not None:
+        worker_kwargs["prometheus_port"] = metrics_config.prometheus_port
+
+    cli.run_app(WorkerOptions(**worker_kwargs))
