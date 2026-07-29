@@ -15,6 +15,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 * build(docker): add LOG_LEVEL env var to control the container's log level
 * build: declare aiohttp and numpy as direct dependencies
 * docs: correct how the OpenAI provider reaches the API and list its caveats
+* docs: expand and correct AGENTS.md
 
 ## v0.3.0
 
