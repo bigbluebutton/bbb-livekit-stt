@@ -88,7 +88,12 @@ class SttMetrics:
         )
         self.transcripts = Counter(
             "bbb_stt_transcripts_total",
-            "Transcripts published to BBB",
+            # Counted once a transcript survives filtering and is sent, whether
+            # or not Redis accepted it. Subtract
+            # bbb_stt_transcript_publish_failures_total for transcripts BBB
+            # actually received; counting only successes would punch holes in the
+            # confidence histogram every time Redis blipped.
+            "Transcripts that passed filtering and were sent to BBB",
             ["provider", "event_type"],
             registry=registry,
         )
@@ -178,7 +183,7 @@ class SttMetrics:
         confidence: float | None = None,
         duration_seconds: float | None = None,
     ) -> None:
-        """Record a transcript that reached BBB.
+        """Record a transcript that passed filtering and was sent to BBB.
 
         ``confidence`` is None for providers that do not report one.
         """
