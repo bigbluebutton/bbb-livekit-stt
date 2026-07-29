@@ -6,6 +6,13 @@ import pytest
 from livekit import rtc
 from livekit.agents import stt
 
+from prometheus_client import CollectorRegistry
+
+from metrics import (
+    SESSION_FAILURE_NO_AUDIO_TRACK,
+    SESSION_FAILURE_PARTICIPANT_NOT_FOUND,
+    SttMetrics,
+)
 from providers.openai import (
     OpenAiConfig,
     OpenAiSttAgent,
@@ -369,3 +376,97 @@ class TestAutoLocale:
 
         assert len(emitted) == 1
         assert emitted[0]["event"].alternatives[0].language is None
+
+
+def _make_metered_openai_agent():
+    registry = CollectorRegistry()
+    agent = OpenAiSttAgent(
+        OpenAiConfig(api_key="fake-key"), metrics=SttMetrics(registry)
+    )
+    return agent, registry
+
+
+def _openai_participant(identity="user_1", with_track=False):
+    participant = MagicMock(spec=rtc.RemoteParticipant)
+    participant.identity = identity
+    pubs = {}
+    if with_track:
+        track = MagicMock()
+        track.kind = rtc.TrackKind.KIND_AUDIO
+        publication = MagicMock()
+        publication.track = track
+        pubs["t"] = publication
+    participant.track_publications = pubs
+    return participant
+
+
+class TestProviderCapabilities:
+    def test_provider_name(self):
+        agent, _ = _make_metered_openai_agent()
+        assert agent.provider_name == "openai"
+
+    def test_does_not_report_confidence(self):
+        """OpenAI's SpeechData omits confidence, leaving it at 0.0."""
+        agent, _ = _make_metered_openai_agent()
+        assert agent.reports_confidence is False
+
+
+class TestOpenAiSessionMetrics:
+    def test_records_participant_not_found(self):
+        agent, registry = _make_metered_openai_agent()
+        agent.room = MagicMock()
+        agent.room.remote_participants = {}
+
+        agent.start_transcription_for_user("ghost", "en-US", "openai")
+
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_session_start_failures_total",
+                {
+                    "provider": "openai",
+                    "reason": SESSION_FAILURE_PARTICIPANT_NOT_FOUND,
+                },
+            )
+            == 1.0
+        )
+
+    def test_records_no_audio_track(self):
+        agent, registry = _make_metered_openai_agent()
+        agent.room = MagicMock()
+        agent.room.remote_participants = {"p": _openai_participant()}
+
+        agent.start_transcription_for_user("user_1", "en-US", "openai")
+
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_session_start_failures_total",
+                {"provider": "openai", "reason": SESSION_FAILURE_NO_AUDIO_TRACK},
+            )
+            == 1.0
+        )
+
+    async def test_locale_change_moves_the_gauge_via_restart(self):
+        """OpenAI restarts the pipeline, so the existing stop and start paths
+        move the gauge; no separate transition is needed."""
+        agent, registry = _make_metered_openai_agent()
+        agent.room = MagicMock()
+        agent.room.remote_participants = {
+            "p": _openai_participant(with_track=True),
+        }
+
+        with patch("providers.openai.rtc.AudioStream"):
+            agent.start_transcription_for_user("user_1", "en-US", "openai")
+            agent.update_locale_for_user("user_1", "pt-BR")
+
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_active_sessions", {"provider": "openai", "locale": "en-US"}
+            )
+            == 0.0
+        )
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_active_sessions", {"provider": "openai", "locale": "pt-BR"}
+            )
+            == 1.0
+        )

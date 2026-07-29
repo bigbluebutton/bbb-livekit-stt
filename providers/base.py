@@ -14,6 +14,14 @@ from livekit.agents import (
 )
 
 from events import EventEmitter
+from metrics import (
+    AGENT_FAILURE_ROOM_CONNECT,
+    SESSION_FAILURE_NO_AUDIO_TRACK,
+    SESSION_FAILURE_PARTICIPANT_NOT_FOUND,
+    SESSION_FAILURE_STREAM_ERROR,
+    SttMetrics,
+    stt_metrics,
+)
 
 
 @dataclass
@@ -26,15 +34,37 @@ class BaseSttConfig:
 
 
 class BaseSttAgent(EventEmitter, ABC):
-    def __init__(self, config: BaseSttConfig):
+    # Overridden by each provider; used as the `provider` metric label.
+    provider_name: str = "unknown"
+
+    def __init__(self, config: BaseSttConfig, metrics: SttMetrics | None = None):
         super().__init__()
         self.config = config
+        self.metrics = stt_metrics if metrics is None else metrics
         self.ctx: JobContext | None = None
         self.room: rtc.Room | None = None
         self.processing_info = {}
         self.participant_settings = {}
         self.open_time = time.time()
         self._shutdown = asyncio.Event()
+
+    @property
+    def reports_confidence(self) -> bool:
+        """Whether the provider populates SpeechData.confidence.
+
+        Providers that do not leave it at its 0.0 default, which must not be
+        observed into the confidence histogram.
+        """
+        return False
+
+    @property
+    def translation_enabled(self) -> bool:
+        """Whether the provider emits transcripts in a translated language.
+
+        When true, a transcript's language legitimately differs from the one the
+        participant requested, so language mismatches must not be counted.
+        """
+        return False
 
     @property
     def translation_lang_map(self) -> Dict[str, str]:
@@ -63,7 +93,14 @@ class BaseSttAgent(EventEmitter, ABC):
         self.ctx = ctx
         # TODO: disable auto_subscribe. Should be on demand based on the participant's
         # transcription settings
-        await self.ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+        try:
+            await self.ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+        except Exception:
+            self.metrics.agent_start_failed(
+                self.provider_name, AGENT_FAILURE_ROOM_CONNECT
+            )
+            raise
+
         self.room = self.ctx.room
 
         self.room.on("participant_disconnected", self._on_participant_disconnected)
@@ -71,10 +108,13 @@ class BaseSttAgent(EventEmitter, ABC):
         self.room.on("track_subscribed", self._on_track_subscribed)
         self.room.on("track_unsubscribed", self._on_track_unsubscribed)
 
+        self.metrics.agent_started(self.provider_name)
+
         try:
             await self._shutdown.wait()
         finally:
             await self._cleanup()
+            self.metrics.agent_stopped(self.provider_name)
 
     async def _cleanup(self):
         for user_id in list(self.processing_info.keys()):
@@ -93,6 +133,9 @@ class BaseSttAgent(EventEmitter, ABC):
             logging.error(
                 f"Cannot start transcription, participant {user_id} not found."
             )
+            self.metrics.session_start_failed(
+                self.provider_name, SESSION_FAILURE_PARTICIPANT_NOT_FOUND
+            )
             return
 
         track = self._find_audio_track(participant)
@@ -101,23 +144,42 @@ class BaseSttAgent(EventEmitter, ABC):
             logging.warning(
                 f"Won't start transcription yet, no audio track found for {user_id}."
             )
+            # Usually transient: BBB sends the locale change before the track is
+            # published, and _on_track_subscribed starts the session shortly after.
+            self.metrics.session_start_failed(
+                self.provider_name, SESSION_FAILURE_NO_AUDIO_TRACK
+            )
             return
 
         if participant.identity in self.processing_info:
             logging.debug(
                 f"Transcription task already running for {participant.identity}, ignoring start command."
             )
+            # A no-op, not a failure: nothing to record.
             return
 
         sanitized_locale = self._sanitize_locale(locale)
-        stt_stream = self._create_stt_stream(sanitized_locale)
+
+        try:
+            stt_stream = self._create_stt_stream(sanitized_locale)
+        except Exception:
+            self.metrics.session_start_failed(
+                self.provider_name, SESSION_FAILURE_STREAM_ERROR
+            )
+            raise
+
         task = asyncio.create_task(
             self._run_transcription_pipeline(participant, track, stt_stream)
         )
         self.processing_info[participant.identity] = {
             "stream": stt_stream,
             "task": task,
+            # The locale the gauge was incremented under. Kept separate from
+            # participant_settings so a later mutation cannot make the decrement
+            # land on a different label and strand a phantom session.
+            "metrics_locale": locale,
         }
+        self.metrics.session_started(self.provider_name, locale)
         logging.info(
             f"Started transcription for {participant.identity} with locale {locale}."
         )
@@ -128,6 +190,7 @@ class BaseSttAgent(EventEmitter, ABC):
         if user_id in self.processing_info:
             info = self.processing_info.pop(user_id)
             info["task"].cancel()
+            self.metrics.session_stopped(self.provider_name, info["metrics_locale"])
             logging.info(f"Stopped transcription for user {user_id}.")
 
     def update_locale_for_user(self, user_id: str, locale: str):
@@ -249,6 +312,15 @@ class BaseSttAgent(EventEmitter, ABC):
                         event=event,
                         open_time=self.open_time,
                     )
+                elif event.type == stt.SpeechEventType.RECOGNITION_USAGE:
+                    # Metrics only: this event carries the provider's own count of
+                    # audio seconds processed and must not reach the transcript
+                    # handlers.
+                    if event.recognition_usage:
+                        self.metrics.provider_audio_observed(
+                            self.provider_name,
+                            event.recognition_usage.audio_duration,
+                        )
 
         try:
             await asyncio.gather(forward_audio_task(), process_stt_task())

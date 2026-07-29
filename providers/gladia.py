@@ -13,6 +13,7 @@ from config import (
     _get_list_env,
     _get_map_env,
 )
+from metrics import DISCARD_LOW_CONFIDENCE, SttMetrics
 from providers.base import BaseSttAgent, BaseSttConfig
 
 DEFAULT_TRANSLATION_LANG_MAP = "de:de-DE,en:en-US,es:es-ES,fr:fr-FR,hi:hi-IN,it:it-IT,ja:ja-JP,pt:pt-BR,ru:ru-RU,zh:zh-CN"
@@ -164,9 +165,19 @@ gladia_config = GladiaConfig()
 
 
 class GladiaSttAgent(BaseSttAgent):
-    def __init__(self, config: GladiaConfig):
-        super().__init__(config)
+    provider_name = "gladia"
+
+    def __init__(self, config: GladiaConfig, metrics: SttMetrics | None = None):
+        super().__init__(config, metrics)
         self.stt = GladiaSTT(**config.to_stt_kwargs())
+
+    @property
+    def reports_confidence(self) -> bool:
+        return True
+
+    @property
+    def translation_enabled(self) -> bool:
+        return bool(self.config.translation_enabled)
 
     @property
     def translation_lang_map(self) -> Dict[str, str]:
@@ -180,10 +191,17 @@ class GladiaSttAgent(BaseSttAgent):
         return self.stt.stream(language=locale)
 
     def _update_stream_locale(self, user_id: str, locale: str):
-        stream = self.processing_info[user_id]["stream"]
+        info = self.processing_info[user_id]
         sanitized_locale = self._sanitize_locale(locale)
         # An empty languages list re-enables Gladia's auto-detection.
-        stream.update_options(languages=[sanitized_locale] if sanitized_locale else [])
+        info["stream"].update_options(
+            languages=[sanitized_locale] if sanitized_locale else []
+        )
+        # The stream is updated in place, so the session survives: move its gauge
+        # to the new label rather than restarting it.
+        old_locale = info["metrics_locale"]
+        info["metrics_locale"] = locale
+        self.metrics.session_locale_changed(self.provider_name, old_locale, locale)
 
     def _should_emit(self, event: stt.SpeechEvent) -> bool:
         if event.type == stt.SpeechEventType.FINAL_TRANSCRIPT:
@@ -198,6 +216,9 @@ class GladiaSttAgent(BaseSttAgent):
                 logging.debug(
                     f"Discarding transcript: low confidence "
                     f"({alt.confidence} < {min_confidence})."
+                )
+                self.metrics.transcript_discarded(
+                    self.provider_name, DISCARD_LOW_CONFIDENCE
                 )
                 return False
 

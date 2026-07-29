@@ -9,6 +9,11 @@ import numpy as np
 from livekit import rtc
 from livekit.agents import stt
 
+from metrics import (
+    SESSION_FAILURE_NO_AUDIO_TRACK,
+    SESSION_FAILURE_PARTICIPANT_NOT_FOUND,
+    SttMetrics,
+)
 from providers.base import BaseSttAgent, BaseSttConfig
 
 # Energy-based voice activity detection parameters.
@@ -35,8 +40,10 @@ openai_config = OpenAiConfig()
 
 
 class OpenAiSttAgent(BaseSttAgent):
-    def __init__(self, config: OpenAiConfig):
-        super().__init__(config)
+    provider_name = "openai"
+
+    def __init__(self, config: OpenAiConfig, metrics: SttMetrics | None = None):
+        super().__init__(config, metrics)
         self._http_session: aiohttp.ClientSession | None = None
 
     # --- HTTP session management ---
@@ -81,7 +88,11 @@ class OpenAiSttAgent(BaseSttAgent):
         raise NotImplementedError("OpenAI REST mode does not use STT streams")
 
     def _update_stream_locale(self, user_id: str, locale: str):
-        """Restart the pipeline with the new locale."""
+        """Restart the pipeline with the new locale.
+
+        No explicit gauge transition: stop and start already move the session
+        gauge between locale labels.
+        """
         provider = self.participant_settings.get(user_id, {}).get("provider", "openai")
         self.stop_transcription_for_user(user_id)
         self.start_transcription_for_user(user_id, locale, provider)
@@ -98,6 +109,9 @@ class OpenAiSttAgent(BaseSttAgent):
             logging.error(
                 f"Cannot start transcription, participant {user_id} not found."
             )
+            self.metrics.session_start_failed(
+                self.provider_name, SESSION_FAILURE_PARTICIPANT_NOT_FOUND
+            )
             return
 
         track = self._find_audio_track(participant)
@@ -105,19 +119,31 @@ class OpenAiSttAgent(BaseSttAgent):
             logging.warning(
                 f"Won't start transcription yet, no audio track found for {user_id}."
             )
+            # Usually transient: BBB sends the locale change before the track is
+            # published, and _on_track_subscribed starts the session shortly after.
+            self.metrics.session_start_failed(
+                self.provider_name, SESSION_FAILURE_NO_AUDIO_TRACK
+            )
             return
 
         if participant.identity in self.processing_info:
             logging.debug(
                 f"Transcription task already running for {participant.identity}, ignoring start command."
             )
+            # A no-op, not a failure: nothing to record.
             return
 
         language = self._sanitize_locale(locale)
         task = asyncio.create_task(
             self._run_transcription_pipeline(participant, track, language)
         )
-        self.processing_info[participant.identity] = {"task": task}
+        self.processing_info[participant.identity] = {
+            "task": task,
+            # See BaseSttAgent.start_transcription_for_user for why this is kept
+            # separate from participant_settings.
+            "metrics_locale": locale,
+        }
+        self.metrics.session_started(self.provider_name, locale)
         logging.info(
             f"Started transcription for {participant.identity} with locale {locale}."
         )

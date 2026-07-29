@@ -6,7 +6,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from livekit import rtc
 from livekit.agents import stt
 from livekit.plugins.gladia import STT as GladiaSTT
+from prometheus_client import CollectorRegistry
 
+from metrics import SttMetrics
 from providers.gladia import GladiaConfig, GladiaSttAgent
 
 
@@ -85,7 +87,11 @@ class TestStopTranscriptionForUser:
     def test_cancels_task_and_removes_from_processing_info(self):
         agent = _make_agent()
         mock_task = MagicMock()
-        agent.processing_info["user_123"] = {"task": mock_task, "stream": MagicMock()}
+        agent.processing_info["user_123"] = {
+            "task": mock_task,
+            "stream": MagicMock(),
+            "metrics_locale": "en-US",
+        }
 
         agent.stop_transcription_for_user("user_123")
 
@@ -111,7 +117,11 @@ class TestUpdateLocaleForUser:
         agent = _make_agent()
         agent.participant_settings["user_1"] = {"locale": "en", "provider": "gladia"}
         mock_stream = MagicMock()
-        agent.processing_info["user_1"] = {"stream": mock_stream, "task": MagicMock()}
+        agent.processing_info["user_1"] = {
+            "stream": mock_stream,
+            "task": MagicMock(),
+            "metrics_locale": "en-US",
+        }
 
         agent.update_locale_for_user("user_1", "de")
 
@@ -122,7 +132,11 @@ class TestUpdateLocaleForUser:
         agent = _make_agent()
         agent.participant_settings["user_1"] = {"locale": "en", "provider": "gladia"}
         mock_stream = MagicMock()
-        agent.processing_info["user_1"] = {"stream": mock_stream, "task": MagicMock()}
+        agent.processing_info["user_1"] = {
+            "stream": mock_stream,
+            "task": MagicMock(),
+            "metrics_locale": "en-US",
+        }
 
         agent.update_locale_for_user("user_1", "auto")
 
@@ -133,7 +147,11 @@ class TestUpdateLocaleForUser:
         agent = _make_agent()
         agent.participant_settings["user_1"] = {"locale": "en", "provider": "gladia"}
         mock_stream = MagicMock()
-        agent.processing_info["user_1"] = {"stream": mock_stream, "task": MagicMock()}
+        agent.processing_info["user_1"] = {
+            "stream": mock_stream,
+            "task": MagicMock(),
+            "metrics_locale": "en-US",
+        }
 
         agent.update_locale_for_user("user_1", "de-DE")
 
@@ -159,7 +177,11 @@ class TestOnParticipantDisconnected:
         agent = _make_agent()
         agent.participant_settings["user_1"] = {"locale": "en", "provider": "gladia"}
         mock_task = MagicMock()
-        agent.processing_info["user_1"] = {"task": mock_task, "stream": MagicMock()}
+        agent.processing_info["user_1"] = {
+            "task": mock_task,
+            "stream": MagicMock(),
+            "metrics_locale": "en-US",
+        }
 
         mock_participant = MagicMock()
         mock_participant.identity = "user_1"
@@ -471,7 +493,11 @@ class TestCleanup:
         tasks = {}
         for uid in ("user_1", "user_2", "user_3"):
             mock_task = MagicMock()
-            agent.processing_info[uid] = {"task": mock_task, "stream": MagicMock()}
+            agent.processing_info[uid] = {
+                "task": mock_task,
+                "stream": MagicMock(),
+                "metrics_locale": "en-US",
+            }
             tasks[uid] = mock_task
 
         await agent._cleanup()
@@ -479,3 +505,83 @@ class TestCleanup:
         for uid, mock_task in tasks.items():
             mock_task.cancel.assert_called_once()
             assert uid not in agent.processing_info
+
+
+def _make_metered_agent(**config_kwargs):
+    """Returns (agent, registry). Mirrors _make_agent but injects a registry."""
+    registry = CollectorRegistry()
+    config = GladiaConfig(api_key="fake-key", **config_kwargs)
+    with patch("providers.gladia.GladiaSTT", spec=GladiaSTT):
+        agent = GladiaSttAgent(config, metrics=SttMetrics(registry))
+    return agent, registry
+
+
+class TestProviderCapabilities:
+    def test_provider_name(self):
+        agent, _ = _make_metered_agent()
+        assert agent.provider_name == "gladia"
+
+    def test_reports_confidence(self):
+        agent, _ = _make_metered_agent()
+        assert agent.reports_confidence is True
+
+    def test_translation_enabled_is_false_by_default(self):
+        agent, _ = _make_metered_agent()
+        assert agent.translation_enabled is False
+
+    def test_translation_enabled_follows_config(self):
+        agent, _ = _make_metered_agent(
+            translation_enabled=True, translation_target_languages=["pt"]
+        )
+        assert agent.translation_enabled is True
+
+
+class TestLocaleChangeGauge:
+    def test_moves_the_session_gauge_to_the_new_locale(self):
+        """Gladia updates the stream in place, so the session survives the change
+        and the gauge must follow it rather than be restarted."""
+        agent, registry = _make_metered_agent()
+        stream = MagicMock()
+        agent.processing_info["user_1"] = {
+            "stream": stream,
+            "task": MagicMock(),
+            "metrics_locale": "en-US",
+        }
+        agent.participant_settings["user_1"] = {"locale": "en-US"}
+        agent.metrics.session_started("gladia", "en-US")
+
+        agent.update_locale_for_user("user_1", "pt-BR")
+
+        stream.update_options.assert_called_once_with(languages=["pt"])
+        assert agent.processing_info["user_1"]["metrics_locale"] == "pt-BR"
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_active_sessions", {"provider": "gladia", "locale": "en-US"}
+            )
+            == 0.0
+        )
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_active_sessions", {"provider": "gladia", "locale": "pt-BR"}
+            )
+            == 1.0
+        )
+
+    def test_does_not_count_a_new_session_start(self):
+        agent, registry = _make_metered_agent()
+        agent.processing_info["user_1"] = {
+            "stream": MagicMock(),
+            "task": MagicMock(),
+            "metrics_locale": "en-US",
+        }
+        agent.participant_settings["user_1"] = {"locale": "en-US"}
+        agent.metrics.session_started("gladia", "en-US")
+
+        agent.update_locale_for_user("user_1", "pt-BR")
+
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_session_starts_total", {"provider": "gladia"}
+            )
+            == 1.0
+        )
