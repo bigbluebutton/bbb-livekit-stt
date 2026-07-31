@@ -2,7 +2,11 @@ import logging
 
 import pytest
 
-from utils import coerce_min_utterance_length_seconds, coerce_partial_utterances
+from utils import (
+    coerce_min_utterance_length_seconds,
+    coerce_partial_utterances,
+    resolve_bbb_locale,
+)
 
 
 class TestCoercePartialUtterances:
@@ -79,3 +83,32 @@ class TestCoerceMinUtteranceLengthSeconds:
 
         assert result == pytest.approx(0.0)
         assert any("Negative" in r.message for r in caplog.records)
+
+
+LANG_MAP = {"en": "en-US", "pt": "pt-BR", "de": "de-DE"}
+
+
+class TestResolveBbbLocale:
+    def test_matching_language_returns_the_original_locale(self):
+        """A transcript in the selected language keeps the participant's region."""
+        assert resolve_bbb_locale("en", "en-GB", LANG_MAP) == "en-GB"
+
+    def test_translated_language_is_mapped(self):
+        assert resolve_bbb_locale("pt", "en-US", LANG_MAP) == "pt-BR"
+
+    def test_unmapped_language_falls_back_to_the_language_code(self, caplog):
+        with caplog.at_level(logging.WARNING):
+            result = resolve_bbb_locale("ja", "en-US", LANG_MAP)
+
+        assert result == "ja"
+        assert any("Could not find a BBB locale" in r.message for r in caplog.records)
+
+    def test_auto_locale_resolves_from_the_detected_language(self):
+        """With 'auto' there is no selected language, so the map always decides."""
+        assert resolve_bbb_locale("pt", "auto", LANG_MAP) == "pt-BR"
+
+    def test_returns_none_when_language_is_unknown(self):
+        """Auto-detection plus a provider that reports no language leaves
+        nothing to resolve - callers must drop the transcript."""
+        assert resolve_bbb_locale(None, "auto", LANG_MAP) is None
+        assert resolve_bbb_locale("", "auto", LANG_MAP) is None

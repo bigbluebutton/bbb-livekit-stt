@@ -11,7 +11,11 @@ from livekit import rtc
 from redis_manager import RedisManager
 from providers import create_agent
 from config import get_redacted_app_config, redis_config, stt_provider
-from utils import coerce_min_utterance_length_seconds, coerce_partial_utterances
+from utils import (
+    coerce_min_utterance_length_seconds,
+    coerce_partial_utterances,
+    resolve_bbb_locale,
+)
 
 load_dotenv()
 
@@ -99,13 +103,16 @@ async def entrypoint(ctx: JobContext):
             )
             return
 
-        original_lang = original_locale.split("-")[0]
+        # "auto" means the provider detects the language, so there is no
+        # selected language to fall back to when a transcript omits one.
+        original_lang = (
+            None if original_locale.lower() == "auto" else original_locale.split("-")[0]
+        )
 
         for alternative in event.alternatives:
             # Some providers (e.g. OpenAI) may not report a language; fall back to original.
             transcript_lang = alternative.language or original_lang
             text = alternative.text
-            bbb_locale = None
             start_time_adjusted = math.floor(open_time + alternative.start_time)
             end_time_adjusted = math.floor(open_time + alternative.end_time)
             utterance_duration_seconds = max(
@@ -125,19 +132,18 @@ async def entrypoint(ctx: JobContext):
                     "alternative": alternative,
                 },
             )
-            if transcript_lang == original_lang:
-                # This is the original transcript, use the original BBB locale
-                bbb_locale = original_locale
-            else:
-                # This is a translated transcript, look it up in the map
-                bbb_locale = agent.translation_lang_map.get(transcript_lang)
+            bbb_locale = resolve_bbb_locale(
+                transcript_lang, original_locale, agent.translation_lang_map
+            )
 
             if not bbb_locale:
                 logging.warning(
-                    f"Could not find a BBB locale mapping for language '{transcript_lang}'. "
-                    f"Falling back to the language code itself. "
+                    f"Discarding final transcript for {participant.identity}: "
+                    f"the provider reported no language and the participant's "
+                    f"locale is '{original_locale}', so there is no BBB locale "
+                    f"to publish it under."
                 )
-                bbb_locale = transcript_lang
+                continue
 
             await redis_manager.publish_update_transcript_pub_msg(
                 agent.room.name,
@@ -168,7 +174,9 @@ async def entrypoint(ctx: JobContext):
             )
             return
 
-        original_lang = original_locale.split("-")[0]
+        original_lang = (
+            None if original_locale.lower() == "auto" else original_locale.split("-")[0]
+        )
         min_utterance_length = p_settings.get("min_utterance_length", 0)
 
         for alternative in event.alternatives:
@@ -200,8 +208,6 @@ async def entrypoint(ctx: JobContext):
                 )
                 continue
 
-            bbb_locale = None
-
             logging.debug(
                 f"INTERIM transcript for {participant.identity} = [{transcript_lang}] {text}",
                 extra={
@@ -217,17 +223,18 @@ async def entrypoint(ctx: JobContext):
                 },
             )
 
-            if transcript_lang == original_lang:
-                bbb_locale = original_locale
-            else:
-                bbb_locale = agent.translation_lang_map.get(transcript_lang)
+            bbb_locale = resolve_bbb_locale(
+                transcript_lang, original_locale, agent.translation_lang_map
+            )
 
             if not bbb_locale:
                 logging.warning(
-                    f"Could not find a BBB locale mapping for language '{transcript_lang}'. "
-                    f"Falling back to the language code itself. "
+                    f"Discarding interim transcript for {participant.identity}: "
+                    f"the provider reported no language and the participant's "
+                    f"locale is '{original_locale}', so there is no BBB locale "
+                    f"to publish it under."
                 )
-                bbb_locale = transcript_lang
+                continue
 
             await redis_manager.publish_update_transcript_pub_msg(
                 agent.room.name,

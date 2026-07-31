@@ -172,13 +172,18 @@ class GladiaSttAgent(BaseSttAgent):
     def translation_lang_map(self) -> Dict[str, str]:
         return self.config.translation_lang_map
 
-    def _create_stt_stream(self, locale: str) -> stt.SpeechStream:
+    def _create_stt_stream(self, locale: str | None) -> stt.SpeechStream:
+        # A None locale ("auto") omits the language so Gladia auto-detects.
+        if locale is None:
+            return self.stt.stream()
+
         return self.stt.stream(language=locale)
 
     def _update_stream_locale(self, user_id: str, locale: str):
         stream = self.processing_info[user_id]["stream"]
         sanitized_locale = self._sanitize_locale(locale)
-        stream.update_options(languages=[sanitized_locale])
+        # An empty languages list re-enables Gladia's auto-detection.
+        stream.update_options(languages=[sanitized_locale] if sanitized_locale else [])
 
     def _should_emit(self, event: stt.SpeechEvent) -> bool:
         if event.type == stt.SpeechEventType.FINAL_TRANSCRIPT:

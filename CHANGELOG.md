@@ -9,23 +9,23 @@ Final releases will consolidate all intermediate changes in chronological order.
 
 * feat(openai): add OpenAI STT provider support (official and compatible endpoints)
 * feat: add GladiaSttAgent provider and factory
+* refactor: extract BaseSttAgent and BaseSttConfig into providers/base.py
 * refactor: move GladiaConfig to providers package, delete old agent module
+* fix: drop transcripts with no resolvable BBB locale instead of publishing a null one
+* build(docker): add LOG_LEVEL env var to control the container's log level
+* build: declare aiohttp and numpy as direct dependencies
+* docs: correct how the OpenAI provider reaches the API and list its caveats
+* docs: expand and correct AGENTS.md
+* feat(voxtral): Voxtral Realtime STT provider with concurrent streaming and Silero neural VAD on Python 3.11
+
+## v0.3.0
+
 * feat(tests): add unit and integration tests with pytest
 * feat(tests): add coverage reporting with pytest-cov
 * feat(tests): add tests for v0.2.0 changes (utils coercions, config redaction, on_track_subscribed fix, new defaults)
-* feat(voxtral): Voxtral Realtime STT provider with concurrent streaming
-* feat(voxtral): replace RMS VAD with Silero neural VAD on Python 3.11
-* fix(voxtral): reduce word loss at max-buffer segment boundaries
-* fix(voxtral): recover from reader failures and flush segments on teardown
-* fix(voxtral): drop redundant bare commit at segment close, detect done/segment desync
-* fix(voxtral): replay a longer overlap when reopening after a max-buffer split
-* fix(voxtral): keep replacement pipeline tracked across locale-change restarts
-* fix(voxtral): resample with rtc.AudioResampler to stop aliasing into the speech band
-* fix(voxtral): retry on handshake timeout, require VOXTRAL_BASE_URL at startup
-* fix(voxtral): request greedy decoding (temperature 0.0) in session.update
-* fix(voxtral): gate opening commits until the previous segment's transcription.done arrives
-* docs: document the Voxtral Realtime provider and Python 3.11 requirement in README
+* fix: handle "auto" locale to prevent invalid language code sent to Gladia
 * build: add GitHub Actions workflow for running tests
+
 ## v0.2.0
 
 * feat(stt): support INTERIM transcriptions

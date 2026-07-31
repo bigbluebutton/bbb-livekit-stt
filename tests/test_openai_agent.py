@@ -289,3 +289,83 @@ class TestCleanup:
 
         mock_session.close.assert_called_once()
         assert agent._http_session is None
+
+
+def _make_http_session(payload=None):
+    """Mock aiohttp session whose post() works as an async context manager."""
+    response = MagicMock()
+    response.raise_for_status = MagicMock()
+    response.json = AsyncMock(return_value=payload or {"text": "hello"})
+
+    post_cm = MagicMock()
+    post_cm.__aenter__ = AsyncMock(return_value=response)
+    post_cm.__aexit__ = AsyncMock(return_value=False)
+
+    session = MagicMock()
+    session.post = MagicMock(return_value=post_cm)
+    return session
+
+
+async def _transcribe_with_mocked_form(agent, language):
+    """Run _transcribe_wav against a mocked session, returning the form fields."""
+    mock_form = MagicMock()
+    agent._get_http_session = MagicMock(return_value=_make_http_session())
+
+    with patch("providers.openai.aiohttp.FormData", return_value=mock_form):
+        await agent._transcribe_wav(b"fake-wav-bytes", language)
+
+    return {call.args[0]: call.args[1] for call in mock_form.add_field.call_args_list}
+
+
+class TestAutoLocale:
+    """The 'auto' locale sanitizes to None; it must never reach the API."""
+
+    async def test_start_transcription_passes_none_language_to_pipeline(self):
+        mock_track = MagicMock()
+        mock_track.kind = rtc.TrackKind.KIND_AUDIO
+        participant = _make_participant("user_1", audio_track=mock_track)
+        agent = _make_agent_with_room(participants={"pid": participant})
+
+        with patch.object(
+            agent, "_run_transcription_pipeline", new_callable=AsyncMock
+        ) as mock_pipeline:
+            agent.start_transcription_for_user("user_1", "auto", "openai")
+            await asyncio.sleep(0)
+
+        mock_pipeline.assert_called_once_with(participant, mock_track, None)
+        agent.processing_info.pop("user_1", None)
+
+    async def test_transcribe_wav_omits_the_language_field(self):
+        """Omitting the field is what makes OpenAI detect the language itself."""
+        fields = await _transcribe_with_mocked_form(_make_agent(), None)
+
+        assert "language" not in fields
+        assert fields["model"] == "gpt-4o-transcribe"
+        assert fields["response_format"] == "json"
+
+    async def test_transcribe_wav_sends_the_language_field_when_known(self):
+        fields = await _transcribe_with_mocked_form(_make_agent(), "pt")
+
+        assert fields["language"] == "pt"
+
+    async def test_emitted_transcript_carries_no_language(self):
+        """Under 'auto' the provider cannot label the transcript, so main.py
+        has to resolve the BBB locale without one."""
+        agent = _make_agent()
+        participant = MagicMock(spec=rtc.RemoteParticipant)
+        participant.identity = "user_1"
+
+        mock_audio_stream = AsyncMock()
+        mock_audio_stream.__aiter__.return_value = iter([_make_loud_event()])
+
+        emitted = []
+        agent.on("final_transcript", lambda **kw: emitted.append(kw))
+        agent._transcribe_wav = AsyncMock(return_value="olá mundo")
+
+        with patch("providers.openai.rtc.AudioStream", return_value=mock_audio_stream):
+            with patch("providers.openai.rtc.combine_audio_frames"):
+                await agent._run_transcription_pipeline(participant, MagicMock(), None)
+            await asyncio.sleep(0)
+
+        assert len(emitted) == 1
+        assert emitted[0]["event"].alternatives[0].language is None

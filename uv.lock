@@ -192,11 +192,14 @@ wheels = [
 
 [[package]]
 name = "bbb-livekit-stt"
-version = "0.2.0"
+version = "0.3.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "aiohttp" },
     { name = "livekit-agents", extra = ["gladia", "silero"] },
     { name = "nest-asyncio" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.3.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "python-dotenv" },
     { name = "redis" },
 ]
@@ -211,8 +214,10 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = "~=3.12" },
     { name = "livekit-agents", extras = ["gladia", "silero"], specifier = "~=1.4" },
     { name = "nest-asyncio", specifier = "~=1.6.0" },
+    { name = "numpy", specifier = "~=2.2" },
     { name = "python-dotenv", specifier = "~=1.1.1" },
     { name = "redis", specifier = "~=6.4.0" },
 ]

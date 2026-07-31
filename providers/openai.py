@@ -48,7 +48,7 @@ class OpenAiSttAgent(BaseSttAgent):
             )
         return self._http_session
 
-    async def _transcribe_wav(self, wav_bytes: bytes, language: str) -> str:
+    async def _transcribe_wav(self, wav_bytes: bytes, language: str | None) -> str:
         """Call the OpenAI-compatible REST endpoint directly.
 
         Constructs the URL as ``{base_url}/v1/audio/transcriptions`` so that
@@ -76,7 +76,7 @@ class OpenAiSttAgent(BaseSttAgent):
 
     # --- BaseSttAgent abstract method implementations ---
 
-    def _create_stt_stream(self, locale: str) -> stt.SpeechStream:  # type: ignore[override]
+    def _create_stt_stream(self, locale: str | None) -> stt.SpeechStream:  # type: ignore[override]
         """Not used: REST mode overrides start_transcription_for_user directly."""
         raise NotImplementedError("OpenAI REST mode does not use STT streams")
 
@@ -136,7 +136,7 @@ class OpenAiSttAgent(BaseSttAgent):
         self,
         participant: rtc.RemoteParticipant,
         track: rtc.Track,
-        language: str,
+        language: str | None,
     ):
         """Collect audio, segment by silence, and transcribe via REST API.
 

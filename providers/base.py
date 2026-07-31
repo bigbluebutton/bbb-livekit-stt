@@ -42,8 +42,12 @@ class BaseSttAgent(EventEmitter, ABC):
         return {}
 
     @abstractmethod
-    def _create_stt_stream(self, locale: str) -> stt.SpeechStream:
-        """Create an STT stream for the given locale. Provider subclasses implement."""
+    def _create_stt_stream(self, locale: str | None) -> stt.SpeechStream:
+        """Create an STT stream for the given locale. Provider subclasses implement.
+
+        A None locale means the BBB user asked for auto-detection: providers
+        must omit the language so the backend detects it server-side.
+        """
         ...
 
     @abstractmethod
@@ -196,11 +200,17 @@ class BaseSttAgent(EventEmitter, ABC):
                 return pub.track
         return None
 
-    def _sanitize_locale(self, locale: str) -> str:
+    def _sanitize_locale(self, locale: str) -> str | None:
         # STT providers typically accept ISO 639-1 locales (e.g. "en")
         # BBB uses <ISO 639-1>-<ISO 3166-1> format (e.g. "en-US")
         # Sanitization here is to ensure we use the provider's format.
-        return locale.split("-")[0].lower()
+        # "auto" is not a valid ISO language code — returning None lets the
+        # provider fall back to server-side auto-detection.
+        sanitized = locale.split("-")[0].lower()
+        if sanitized == "auto":
+            return None
+
+        return sanitized
 
     async def _run_transcription_pipeline(
         self,

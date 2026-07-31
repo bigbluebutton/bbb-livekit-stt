@@ -1,6 +1,6 @@
 [project]
 name = "bbb-livekit-stt"
-version = "0.2.0"
+version = "0.3.0"
 description = "Provides STT for BigBlueButton meetings using LiveKit as their audio bridge."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -9,6 +9,10 @@ dependencies = [
     "python-dotenv~=1.1.1",
     "redis~=6.4.0",
     "nest-asyncio~=1.6.0",
+    # Imported directly by providers/openai.py. They also come in transitively
+    # via livekit-agents, so keep the bounds loose enough not to fight its own.
+    "aiohttp~=3.12",
+    "numpy~=2.2",
 ]
 
 [dependency-groups]
