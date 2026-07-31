@@ -7,14 +7,15 @@ Supported STT engines:
 
 - **Gladia** — via the official [LiveKit Gladia plugin](https://docs.livekit.io/agents/integrations/stt/gladia/) (default)
 - **OpenAI** — via a direct REST client against `/v1/audio/transcriptions`; supports the official OpenAI API and any OpenAI-compatible endpoint
+- **Voxtral Realtime** — [Mistral Voxtral Mini Realtime](https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602) served by a self-hosted [vLLM](https://docs.vllm.ai/) instance via its realtime WebSocket API
 
 ## Getting Started
 
 ### Environment prerequisites
 
-- Python 3.10+
+- Python 3.11+
 - A LiveKit instance
-- A Gladia API key **or** an OpenAI API key (depending on your chosen STT provider)
+- A Gladia API key, an OpenAI API key, **or** a vLLM server hosting Voxtral (depending on your chosen STT provider)
 - uv:
   - See installation instructions: https://docs.astral.sh/uv/getting-started/installation/
 
@@ -144,6 +145,29 @@ Some caveats apply to this provider:
   `response_format=json`, whose payload carries only the transcribed text, so
   there is no detected language to map back to a BBB locale and the transcript is
   discarded with a warning. Set an explicit locale in BBB when using OpenAI STT.
+
+### Voxtral Realtime STT provider
+
+Set `STT_PROVIDER=voxtral-realtime` to use a self-hosted
+[Voxtral Mini Realtime](https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602)
+model served by [vLLM](https://docs.vllm.ai/). The agent streams each
+participant's audio over vLLM's realtime WebSocket API, gated by a local
+Silero VAD, and emits live interim captions from the model's incremental
+deltas.
+
+```bash
+STT_PROVIDER=voxtral-realtime
+VOXTRAL_BASE_URL=https://your-vllm-server:8000/v1   # required
+VOXTRAL_API_KEY=your-key                            # if your server enforces one
+# VOXTRAL_MODEL=mistralai/Voxtral-Mini-4B-Realtime-2602  # default
+```
+
+VAD and segmentation tuning options (silence duration, pre-roll, split
+overlap, max segment length) are documented in `.env.example`.
+
+> **Note**: Voxtral Realtime does not support real-time translation. Only the
+> original transcript language is returned, matching the user's BBB speech
+> locale.
 
 ### Development
 
