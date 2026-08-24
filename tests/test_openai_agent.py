@@ -163,7 +163,8 @@ class TestRunTranscriptionPipeline:
         mock_audio_stream = AsyncMock()
         mock_audio_stream.__aiter__.side_effect = asyncio.CancelledError
 
-        agent.processing_info["user_1"] = {"task": MagicMock()}
+        # The pipeline only clears an entry it still owns.
+        agent.processing_info["user_1"] = {"task": asyncio.current_task()}
 
         with patch("providers.openai.rtc.AudioStream", return_value=mock_audio_stream):
             await agent._run_transcription_pipeline(mock_participant, mock_track, "en")
@@ -250,7 +251,8 @@ class TestRunTranscriptionPipeline:
         mock_audio_stream = AsyncMock()
         mock_audio_stream.__aiter__.side_effect = RuntimeError("boom")
 
-        agent.processing_info["user_1"] = {"task": MagicMock()}
+        # The pipeline only clears an entry it still owns.
+        agent.processing_info["user_1"] = {"task": asyncio.current_task()}
 
         with patch("providers.openai.rtc.AudioStream", return_value=mock_audio_stream):
             await agent._run_transcription_pipeline(mock_participant, mock_track, "en")
