@@ -327,3 +327,333 @@ class TestRecognitionUsage:
             == 5.0
         )
         assert emitted == []
+
+
+class _BlockingStream:
+    """Async iterator that blocks forever, keeping a pipeline alive until cancelled."""
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await asyncio.Event().wait()
+        raise StopAsyncIteration
+
+    def push_frame(self, frame):
+        pass
+
+    def flush(self):
+        pass
+
+    async def aclose(self):
+        pass
+
+
+def _agent_with_participant(identity="user_1"):
+    """Instrumented agent whose room holds one participant with a live mic track."""
+    agent, registry = _make_instrumented_agent()
+    participant = _with_audio_track(_stub_participant(identity))
+    agent.room = MagicMock()
+    agent.room.remote_participants = {"p": participant}
+    return agent, registry, participant
+
+
+async def _drain(*tasks):
+    """Cancel the pipeline tasks a test started so none outlive the test."""
+    live = [task for task in tasks if task is not None]
+    for task in live:
+        task.cancel()
+    await asyncio.gather(*live, return_exceptions=True)
+
+
+class TestSpeechLocaleChangeDispatch:
+    """BBB's UserSpeechLocaleChangedEvtMsg drives the whole session lifecycle:
+    a locale plus a provider enables transcription, an empty pair disables it.
+    """
+
+    async def test_enabling_starts_a_session(self):
+        agent, registry, _ = _agent_with_participant()
+
+        with patch("providers.base.rtc.AudioStream"):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            task = agent.processing_info["user_1"]["task"]
+
+        assert agent.participant_settings["user_1"]["locale"] == "pt-BR"
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_active_sessions",
+                {"provider": agent.provider_name, "locale": "pt-BR"},
+            )
+            == 1.0
+        )
+        await _drain(task)
+
+    async def test_disabling_stops_the_session_and_forgets_the_locale(self):
+        """BBB sends an empty locale and provider when the user unassigns the
+        transcription language. The stored locale must go with the session, or
+        the agent still believes transcription is on."""
+        agent, _, _ = _agent_with_participant()
+
+        with patch("providers.base.rtc.AudioStream"):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            task = agent.processing_info["user_1"]["task"]
+            agent.handle_speech_locale_change("user_1", "", "")
+
+        assert "user_1" not in agent.processing_info
+        assert not agent.participant_settings["user_1"].get("locale")
+        assert not agent.participant_settings["user_1"].get("provider")
+        await _drain(task)
+
+    async def test_disabling_keeps_the_speech_options(self):
+        """Speech options arrive on their own event and are not resent when the
+        locale is reassigned, so a disable must not drop them."""
+        agent, _, _ = _agent_with_participant()
+        agent.participant_settings["user_1"] = {
+            "partial_utterances": True,
+            "min_utterance_length": 1.0,
+        }
+
+        with patch("providers.base.rtc.AudioStream"):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            task = agent.processing_info["user_1"]["task"]
+            agent.handle_speech_locale_change("user_1", "", "")
+
+        assert agent.participant_settings["user_1"]["partial_utterances"] is True
+        assert agent.participant_settings["user_1"]["min_utterance_length"] == 1.0
+        await _drain(task)
+
+    async def test_reenabling_the_same_locale_starts_a_new_session(self):
+        """Regression: disabling and re-enabling the same locale left the agent
+        with a stale locale that made the re-enable a silent no-op, so
+        transcription never came back."""
+        agent, registry, _ = _agent_with_participant()
+
+        with patch("providers.base.rtc.AudioStream"):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            first = agent.processing_info["user_1"]["task"]
+            agent.handle_speech_locale_change("user_1", "", "")
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+
+            assert "user_1" in agent.processing_info
+            second = agent.processing_info["user_1"]["task"]
+
+        assert second is not first
+        assert agent.participant_settings["user_1"]["locale"] == "pt-BR"
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_active_sessions",
+                {"provider": agent.provider_name, "locale": "pt-BR"},
+            )
+            == 1.0
+        )
+        await _drain(first, second)
+
+    async def test_reenabling_a_different_locale_starts_a_new_session(self):
+        agent, _, _ = _agent_with_participant()
+
+        with patch("providers.base.rtc.AudioStream"):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            first = agent.processing_info["user_1"]["task"]
+            agent.handle_speech_locale_change("user_1", "", "")
+            agent.handle_speech_locale_change("user_1", "en-US", "gladia")
+
+            assert "user_1" in agent.processing_info
+            second = agent.processing_info["user_1"]["task"]
+
+        assert agent.participant_settings["user_1"]["locale"] == "en-US"
+        await _drain(first, second)
+
+    async def test_changing_locale_while_running_updates_in_place(self):
+        agent, _, _ = _agent_with_participant()
+
+        with patch("providers.base.rtc.AudioStream"):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            task = agent.processing_info["user_1"]["task"]
+            stream = agent.processing_info["user_1"]["stream"]
+
+            agent.handle_speech_locale_change("user_1", "en-US", "gladia")
+
+            assert agent.processing_info["user_1"]["task"] is task
+            stream.update_options.assert_called_once_with(languages=["en"])
+
+        assert agent.participant_settings["user_1"]["locale"] == "en-US"
+        await _drain(task)
+
+    async def test_reasserting_the_running_locale_is_a_no_op(self):
+        agent, _, _ = _agent_with_participant()
+
+        with patch("providers.base.rtc.AudioStream"):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            task = agent.processing_info["user_1"]["task"]
+            stream = agent.processing_info["user_1"]["stream"]
+
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+
+            assert agent.processing_info["user_1"]["task"] is task
+            stream.update_options.assert_not_called()
+
+        await _drain(task)
+
+    async def test_enabling_without_a_track_starts_on_track_subscribed(self):
+        """BBB routinely sends the locale before the mic track is published."""
+        agent, _, participant = _agent_with_participant()
+        participant.track_publications = {}
+
+        agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+        assert "user_1" not in agent.processing_info
+
+        _with_audio_track(participant)
+        publication = MagicMock()
+        publication.source = rtc.TrackSource.SOURCE_MICROPHONE
+
+        with patch("providers.base.rtc.AudioStream"):
+            agent._on_track_subscribed(MagicMock(), publication, participant)
+            task = agent.processing_info["user_1"]["task"]
+
+        await _drain(task)
+
+    async def test_track_resubscribing_after_a_disable_does_not_restart(self):
+        """Republishing the mic must not resurrect transcription the user turned
+        off — after a disable there is no locale left to start with."""
+        agent, _, participant = _agent_with_participant()
+
+        with patch("providers.base.rtc.AudioStream"):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            task = agent.processing_info["user_1"]["task"]
+            agent.handle_speech_locale_change("user_1", "", "")
+
+            publication = MagicMock()
+            publication.source = rtc.TrackSource.SOURCE_MICROPHONE
+            agent._on_track_subscribed(MagicMock(), publication, participant)
+
+        assert "user_1" not in agent.processing_info
+        await _drain(task)
+
+    async def test_reenabling_after_the_track_dropped_starts_a_new_session(self):
+        """A muted participant's track is unpublished, which stops the session
+        but leaves the locale in place. Re-asserting it must start again."""
+        agent, _, participant = _agent_with_participant()
+
+        with patch("providers.base.rtc.AudioStream"):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            first = agent.processing_info["user_1"]["task"]
+
+            agent._on_track_unsubscribed(MagicMock(), MagicMock(), participant)
+            assert "user_1" not in agent.processing_info
+
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            second = agent.processing_info["user_1"]["task"]
+
+        await _drain(first, second)
+
+    async def test_restarting_within_one_loop_turn_keeps_the_new_session(self):
+        """A disable and a re-enable can both be handled before the cancelled
+        pipeline gets to run its cleanup. That cleanup must not evict the
+        session that took the slot over."""
+
+        class BlockingAgent(StubSttAgent):
+            def _create_stt_stream(self, locale):
+                return _BlockingStream()
+
+        agent = BlockingAgent(BaseSttConfig(), metrics=SttMetrics(CollectorRegistry()))
+        agent.room = MagicMock()
+        agent.room.remote_participants = {"p": _with_audio_track(_stub_participant())}
+
+        with patch("providers.base.rtc.AudioStream", return_value=_BlockingStream()):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            first = agent.processing_info["user_1"]["task"]
+
+            # Let the pipeline actually start, so its cancellation later has a
+            # try/finally to unwind.
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+            agent.handle_speech_locale_change("user_1", "", "")
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            second = agent.processing_info["user_1"]["task"]
+
+            # Let the cancelled pipeline reach its cleanup.
+            for _ in range(5):
+                await asyncio.sleep(0)
+
+            assert agent.processing_info.get("user_1", {}).get("task") is second
+            await _drain(first, second)
+
+    async def test_an_empty_locale_disables_even_with_the_provider_still_set(self):
+        """Seen on the wire when transcription is paused/deactivated:
+        `{"locale": "", "provider": "gladia"}`. Only the pair being complete
+        means "enabled", so a cleared locale disables regardless of provider."""
+        agent, registry, _ = _agent_with_participant()
+
+        with patch("providers.base.rtc.AudioStream"):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            task = agent.processing_info["user_1"]["task"]
+
+            agent.handle_speech_locale_change("user_1", "", "gladia")
+
+        assert "user_1" not in agent.processing_info
+        assert not agent.participant_settings["user_1"].get("locale")
+        assert not agent.participant_settings["user_1"].get("provider")
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_active_sessions",
+                {"provider": agent.provider_name, "locale": "pt-BR"},
+            )
+            == 0.0
+        )
+        await _drain(task)
+
+    async def test_resuming_after_a_provider_only_pause_starts_a_new_session(self):
+        """The pause/resume round trip: locale cleared with the provider left in
+        place, then the same locale reasserted."""
+        agent, _, _ = _agent_with_participant()
+
+        with patch("providers.base.rtc.AudioStream"):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            first = agent.processing_info["user_1"]["task"]
+            agent.handle_speech_locale_change("user_1", "", "gladia")
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+
+            assert "user_1" in agent.processing_info
+            second = agent.processing_info["user_1"]["task"]
+
+        assert second is not first
+        assert agent.participant_settings["user_1"]["locale"] == "pt-BR"
+        await _drain(first, second)
+
+    async def test_track_resubscribing_after_a_provider_only_pause_does_not_restart(
+        self,
+    ):
+        agent, _, participant = _agent_with_participant()
+
+        with patch("providers.base.rtc.AudioStream"):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            task = agent.processing_info["user_1"]["task"]
+            agent.handle_speech_locale_change("user_1", "", "gladia")
+
+            publication = MagicMock()
+            publication.source = rtc.TrackSource.SOURCE_MICROPHONE
+            agent._on_track_subscribed(MagicMock(), publication, participant)
+
+        assert "user_1" not in agent.processing_info
+        await _drain(task)
+
+    async def test_absent_locale_and_provider_fields_disable(self):
+        """`body.get()` yields None when akka omits a field; that is not an
+        enable either."""
+        agent, _, _ = _agent_with_participant()
+
+        with patch("providers.base.rtc.AudioStream"):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            task = agent.processing_info["user_1"]["task"]
+
+            agent.handle_speech_locale_change("user_1", None, None)
+
+        assert "user_1" not in agent.processing_info
+        assert not agent.participant_settings["user_1"].get("locale")
+        await _drain(task)
+
+    def test_disabling_an_unknown_user_is_a_no_op(self):
+        agent, _, _ = _agent_with_participant()
+        agent.handle_speech_locale_change("ghost", "", "")
+        assert "ghost" not in agent.processing_info
