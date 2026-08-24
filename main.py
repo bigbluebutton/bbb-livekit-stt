@@ -77,19 +77,9 @@ async def entrypoint(ctx: JobContext):
                 return
 
             if event_name == RedisManager.USER_SPEECH_LOCALE_CHANGED_EVT_MSG:
-                locale = body.get("locale")
-                provider = body.get("provider")
-
-                if not (provider and locale):
-                    agent.stop_transcription_for_user(user_id)
-                else:
-                    current_locale = agent.participant_settings.get(user_id, {}).get(
-                        "locale"
-                    )
-                    if current_locale and current_locale != locale:
-                        agent.update_locale_for_user(user_id, locale)
-                    elif not current_locale:
-                        agent.start_transcription_for_user(user_id, locale, provider)
+                agent.handle_speech_locale_change(
+                    user_id, body.get("locale"), body.get("provider")
+                )
 
             elif event_name == RedisManager.USER_SPEECH_OPTIONS_CHANGED_EVT_MSG:
                 partial_utterances = coerce_partial_utterances(
