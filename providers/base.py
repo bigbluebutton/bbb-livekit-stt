@@ -237,6 +237,17 @@ class BaseSttAgent(EventEmitter, ABC):
             self.metrics.session_stopped(self.provider_name, info["metrics_locale"])
             logging.info(f"Stopped transcription for user {user_id}.")
 
+    def _release_session_slot(self, user_id: str):
+        """Clear a finished pipeline's own entry from processing_info.
+
+        Called from the pipeline task itself. A session that replaced it while
+        it was being cancelled owns the slot by then, and popping that one would
+        strand a running pipeline the agent can no longer stop or account for.
+        """
+        info = self.processing_info.get(user_id)
+        if info is not None and info["task"] is asyncio.current_task():
+            del self.processing_info[user_id]
+
     def update_locale_for_user(self, user_id: str, locale: str):
         if user_id in self.participant_settings:
             self.participant_settings[user_id]["locale"] = locale
@@ -373,4 +384,4 @@ class BaseSttAgent(EventEmitter, ABC):
         except Exception as e:
             logging.error(f"Error during transcription for track {track.sid}: {e}")
         finally:
-            self.processing_info.pop(participant.identity, None)
+            self._release_session_slot(participant.identity)

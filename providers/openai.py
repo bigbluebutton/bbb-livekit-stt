@@ -266,5 +266,5 @@ class OpenAiSttAgent(BaseSttAgent):
         except Exception as e:
             logging.error(f"Error during transcription for track {track.sid}: {e}")
         finally:
-            self.processing_info.pop(participant.identity, None)
+            self._release_session_slot(participant.identity)
             await audio_stream.aclose()

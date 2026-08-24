@@ -18,6 +18,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 * fix: drop transcripts with no resolvable BBB locale instead of publishing a null one
 * fix: report Redis connect and publish failures to callers
 * fix: restart transcription when a speech locale is reassigned
+* fix: keep a restarted transcription session's processing_info entry
 * build(docker): add LOG_LEVEL env var to control the container's log level
 * build: declare aiohttp and numpy as direct dependencies
 * docs: correct how the OpenAI provider reaches the API and list its caveats

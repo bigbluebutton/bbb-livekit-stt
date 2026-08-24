@@ -368,7 +368,8 @@ class TestRunTranscriptionPipeline:
 
         agent.processing_info["user_1"] = {
             "stream": mock_stt_stream,
-            "task": MagicMock(),
+            # The pipeline only clears an entry it still owns.
+            "task": asyncio.current_task(),
         }
 
         with patch("providers.base.rtc.AudioStream", return_value=mock_audio_stream):
@@ -475,7 +476,8 @@ class TestRunTranscriptionPipeline:
 
         agent.processing_info["user_1"] = {
             "stream": mock_stt_stream,
-            "task": MagicMock(),
+            # The pipeline only clears an entry it still owns.
+            "task": asyncio.current_task(),
         }
 
         with patch("providers.base.rtc.AudioStream", return_value=mock_audio_stream):
