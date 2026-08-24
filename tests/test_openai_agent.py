@@ -20,6 +20,26 @@ from providers.openai import (
 )
 
 
+class _BlockingStream:
+    """Async iterator that blocks forever, keeping a pipeline alive until cancelled."""
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await asyncio.Event().wait()
+        raise StopAsyncIteration
+
+    def push_frame(self, frame):
+        pass
+
+    def flush(self):
+        pass
+
+    async def aclose(self):
+        pass
+
+
 def _make_agent(**kwargs):
     config = OpenAiConfig(api_key="fake-key", **kwargs)
     return OpenAiSttAgent(config)
@@ -285,6 +305,67 @@ class TestRunTranscriptionPipeline:
         alt = emitted[0]["event"].alternatives[0]
         assert alt.start_time >= 0.0
         assert alt.end_time >= alt.start_time
+
+
+class TestSessionSlotOwnership:
+    async def test_restarting_within_one_loop_turn_keeps_the_new_session(self):
+        """The REST pipeline clears its own slot on the way out; a session that
+        replaced it while it was being cancelled must survive."""
+        mock_track = MagicMock()
+        mock_track.kind = rtc.TrackKind.KIND_AUDIO
+        participant = _make_participant("user_1", audio_track=mock_track)
+        agent = _make_agent_with_room(participants={"p": participant})
+
+        with patch("providers.openai.rtc.AudioStream", return_value=_BlockingStream()):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "openai")
+            first = agent.processing_info["user_1"]["task"]
+
+            # Let the pipeline actually start, so its cancellation later has a
+            # try/finally to unwind.
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+            agent.handle_speech_locale_change("user_1", "", "")
+            agent.handle_speech_locale_change("user_1", "pt-BR", "openai")
+            second = agent.processing_info["user_1"]["task"]
+
+            for _ in range(5):
+                await asyncio.sleep(0)
+
+            assert agent.processing_info.get("user_1", {}).get("task") is second
+
+            for task in (first, second):
+                task.cancel()
+            await asyncio.gather(first, second, return_exceptions=True)
+
+    async def test_changing_locale_while_running_keeps_the_new_session(self):
+        """OpenAI changes locale by restarting the pipeline: the cancelled one
+        must not evict the replacement that already took the slot."""
+        mock_track = MagicMock()
+        mock_track.kind = rtc.TrackKind.KIND_AUDIO
+        participant = _make_participant("user_1", audio_track=mock_track)
+        agent = _make_agent_with_room(participants={"p": participant})
+
+        with patch("providers.openai.rtc.AudioStream", return_value=_BlockingStream()):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "openai")
+            first = agent.processing_info["user_1"]["task"]
+
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+            agent.handle_speech_locale_change("user_1", "en-US", "openai")
+            second = agent.processing_info["user_1"]["task"]
+
+            for _ in range(5):
+                await asyncio.sleep(0)
+
+            assert second is not first
+            assert agent.processing_info.get("user_1", {}).get("task") is second
+            assert agent.participant_settings["user_1"]["locale"] == "en-US"
+
+            for task in (first, second):
+                task.cancel()
+            await asyncio.gather(first, second, return_exceptions=True)
 
 
 class TestCleanup:
