@@ -439,3 +439,33 @@ class TestTranscriptPublishFailed:
             )
             == 1.0
         )
+
+
+class TestLocaleUpdateFailed:
+    def test_increments_the_counter(self):
+        registry = CollectorRegistry()
+        metrics = SttMetrics(registry)
+
+        metrics.locale_update_failed("gladia")
+
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_locale_update_failures_total", {"provider": "gladia"}
+            )
+            == 1.0
+        )
+
+    def test_leaves_the_session_gauge_alone(self):
+        """The session keeps running in the locale it already had."""
+        registry = CollectorRegistry()
+        metrics = SttMetrics(registry)
+        metrics.session_started("gladia", "pt-BR")
+
+        metrics.locale_update_failed("gladia")
+
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_active_sessions", {"provider": "gladia", "locale": "pt-BR"}
+            )
+            == 1.0
+        )

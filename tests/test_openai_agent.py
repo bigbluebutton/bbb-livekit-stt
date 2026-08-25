@@ -21,13 +21,21 @@ from providers.openai import (
 
 
 class _BlockingStream:
-    """Async iterator that blocks forever, keeping a pipeline alive until cancelled."""
+    """Async iterator that blocks until its input is ended or it is closed.
+
+    Models the provider stream contract: a recognizer keeps yielding until the
+    pipeline tells it no more audio is coming.
+    """
+
+    def __init__(self):
+        self.closed = False
+        self._ended = asyncio.Event()
 
     def __aiter__(self):
         return self
 
     async def __anext__(self):
-        await asyncio.Event().wait()
+        await self._ended.wait()
         raise StopAsyncIteration
 
     def push_frame(self, frame):
@@ -36,8 +44,12 @@ class _BlockingStream:
     def flush(self):
         pass
 
+    def end_input(self):
+        self._ended.set()
+
     async def aclose(self):
-        pass
+        self.closed = True
+        self._ended.set()
 
 
 def _make_agent(**kwargs):
@@ -325,7 +337,10 @@ class TestSessionSlotOwnership:
         participant = _make_participant("user_1", audio_track=mock_track)
         agent = _make_agent_with_room(participants={"p": participant})
 
-        with patch("providers.openai.rtc.AudioStream", return_value=_BlockingStream()):
+        with patch(
+            "providers.openai.rtc.AudioStream",
+            side_effect=lambda *_, **__: _BlockingStream(),
+        ):
             agent.handle_speech_locale_change("user_1", "pt-BR", "openai")
             first = agent.processing_info["user_1"]["task"]
 
@@ -355,7 +370,10 @@ class TestSessionSlotOwnership:
         participant = _make_participant("user_1", audio_track=mock_track)
         agent = _make_agent_with_room(participants={"p": participant})
 
-        with patch("providers.openai.rtc.AudioStream", return_value=_BlockingStream()):
+        with patch(
+            "providers.openai.rtc.AudioStream",
+            side_effect=lambda *_, **__: _BlockingStream(),
+        ):
             agent.handle_speech_locale_change("user_1", "pt-BR", "openai")
             first = agent.processing_info["user_1"]["task"]
 
@@ -463,7 +481,10 @@ class TestOpenAiSessionAccounting:
 
         agent = _make_agent_with_room(participants={"p": participant})
 
-        with patch("providers.openai.rtc.AudioStream", return_value=_BlockingStream()):
+        with patch(
+            "providers.openai.rtc.AudioStream",
+            side_effect=lambda *_, **__: _BlockingStream(),
+        ):
             agent.handle_speech_locale_change("user_1", "pt-BR", "openai")
             task = agent.processing_info["user_1"]["task"]
 
