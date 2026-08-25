@@ -45,7 +45,6 @@ class BaseSttAgent(EventEmitter, ABC):
         self.room: rtc.Room | None = None
         self.processing_info = {}
         self.participant_settings = {}
-        self.open_time = time.time()
         self._shutdown = asyncio.Event()
 
     @property
@@ -399,7 +398,12 @@ class BaseSttAgent(EventEmitter, ABC):
         stt_stream: stt.SpeechStream,
     ):
         audio_stream = None
-        self.open_time = time.time()
+        # The provider reports offsets within this stream, so the moment it opened
+        # is what turns them into wall clock. It belongs to this session: the
+        # agent serves every participant in the room, and a shared value would be
+        # rewritten by the next session to start, stamping everyone else's
+        # transcripts with an epoch that is not theirs.
+        open_time = time.time()
 
         async def forward_audio_task():
             try:
@@ -420,7 +424,7 @@ class BaseSttAgent(EventEmitter, ABC):
                         "final_transcript",
                         participant=participant,
                         event=event,
-                        open_time=self.open_time,
+                        open_time=open_time,
                     )
                 elif (
                     event.type == stt.SpeechEventType.INTERIM_TRANSCRIPT
@@ -430,7 +434,7 @@ class BaseSttAgent(EventEmitter, ABC):
                         "interim_transcript",
                         participant=participant,
                         event=event,
-                        open_time=self.open_time,
+                        open_time=open_time,
                     )
                 elif event.type == stt.SpeechEventType.RECOGNITION_USAGE:
                     # Metrics only: this event carries the provider's own count of

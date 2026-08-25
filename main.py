@@ -102,7 +102,7 @@ async def entrypoint(ctx: JobContext):
     async def on_final_transcript(
         participant: rtc.RemoteParticipant,
         event: stt.SpeechEvent,
-        open_time: float = agent.open_time,
+        open_time: float,
     ):
         p_settings = agent.participant_settings.get(participant.identity, {})
         original_locale = p_settings.get("locale")
@@ -195,7 +195,7 @@ async def entrypoint(ctx: JobContext):
     async def on_interim_transcript(
         participant: rtc.RemoteParticipant,
         event: stt.SpeechEvent,
-        open_time: float = agent.open_time,
+        open_time: float,
     ):
         p_settings = agent.participant_settings.get(participant.identity, {})
 

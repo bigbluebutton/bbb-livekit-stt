@@ -180,7 +180,6 @@ class OpenAiSttAgent(BaseSttAgent):
         """
         audio_stream = None
         open_time = time.time()
-        self.open_time = open_time
 
         speech_buffer: list[rtc.AudioFrame] = []
         buffer_duration = 0.0

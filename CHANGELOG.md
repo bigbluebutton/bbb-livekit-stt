@@ -23,6 +23,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 * fix: transcribe a participant's microphone track only
 * fix: close the provider streams when a transcription session ends
 * fix: keep the stored locale when a live locale change is rejected
+* fix: stamp each transcript with its own session's start time
 * build(docker): add LOG_LEVEL env var to control the container's log level
 * build: declare aiohttp and numpy as direct dependencies
 * docs: correct how the OpenAI provider reaches the API and list its caveats
