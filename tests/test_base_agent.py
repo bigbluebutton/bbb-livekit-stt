@@ -664,3 +664,192 @@ class TestSpeechLocaleChangeDispatch:
         agent, _, _ = _agent_with_participant()
         agent.handle_speech_locale_change("ghost", "", "")
         assert "ghost" not in agent.processing_info
+
+
+class _DyingStream:
+    """Audio stream that fails once the pipeline is already running."""
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await asyncio.sleep(0)
+        raise RuntimeError("provider connection dropped")
+
+
+class _EndingStream:
+    """Audio stream that ends, as it does when the track closes."""
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise StopAsyncIteration
+
+
+class TestSessionAccountingWhenAPipelineDies:
+    """Only stop_transcription_for_user used to decrement the session gauge, so a
+    pipeline that ended on its own left its label stranded for the process's life."""
+
+    async def _run_until_death(self, audio_stream):
+        agent, registry = _make_instrumented_agent()
+        agent.room = MagicMock()
+        agent.room.remote_participants = {"p": _with_audio_track(_stub_participant())}
+
+        with patch("providers.base.rtc.AudioStream", return_value=audio_stream):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            task = agent.processing_info["user_1"]["task"]
+            await asyncio.gather(task, return_exceptions=True)
+
+        return agent, registry
+
+    def _sessions(self, registry, agent, locale="pt-BR"):
+        return registry.get_sample_value(
+            "bbb_stt_active_sessions",
+            {"provider": agent.provider_name, "locale": locale},
+        )
+
+    async def test_gauge_returns_to_zero_when_the_pipeline_raises(self):
+        agent, registry = await self._run_until_death(_DyingStream())
+
+        assert "user_1" not in agent.processing_info
+        assert self._sessions(registry, agent) == 0.0
+
+    async def test_gauge_returns_to_zero_when_the_audio_stream_ends(self):
+        agent, registry = await self._run_until_death(_EndingStream())
+
+        assert "user_1" not in agent.processing_info
+        assert self._sessions(registry, agent) == 0.0
+
+    async def test_stopping_a_session_decrements_exactly_once(self):
+        """The stop path decrements before cancelling; the cancelled pipeline must
+        not decrement the same session again on its way out."""
+        agent, registry = _make_instrumented_agent()
+        agent.room = MagicMock()
+        agent.room.remote_participants = {"p": _with_audio_track(_stub_participant())}
+
+        with patch("providers.base.rtc.AudioStream", return_value=_BlockingStream()):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            task = agent.processing_info["user_1"]["task"]
+
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+            agent.handle_speech_locale_change("user_1", "", "")
+            await asyncio.gather(task, return_exceptions=True)
+
+        assert self._sessions(registry, agent) == 0.0
+
+    async def test_a_replaced_session_keeps_its_gauge(self):
+        """The cancelled pipeline no longer owns the slot, so its accounting must
+        not follow the replacement."""
+
+        class BlockingAgent(StubSttAgent):
+            def _create_stt_stream(self, locale):
+                return _BlockingStream()
+
+        registry = CollectorRegistry()
+        agent = BlockingAgent(BaseSttConfig(), metrics=SttMetrics(registry))
+        agent.room = MagicMock()
+        agent.room.remote_participants = {"p": _with_audio_track(_stub_participant())}
+
+        with patch("providers.base.rtc.AudioStream", return_value=_BlockingStream()):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            first = agent.processing_info["user_1"]["task"]
+
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+            agent.handle_speech_locale_change("user_1", "", "")
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            second = agent.processing_info["user_1"]["task"]
+
+            for _ in range(5):
+                await asyncio.sleep(0)
+
+            assert self._sessions(registry, agent) == 1.0
+            await _drain(first, second)
+
+    async def test_an_unopenable_audio_stream_leaves_no_session_behind(self):
+        """Opening the audio stream is part of the pipeline: when it fails there is
+        no session, and the participant can start one again."""
+        agent, registry = _make_instrumented_agent()
+        agent.room = MagicMock()
+        agent.room.remote_participants = {"p": _with_audio_track(_stub_participant())}
+
+        with patch(
+            "providers.base.rtc.AudioStream", side_effect=RuntimeError("no such track")
+        ):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            task = agent.processing_info["user_1"]["task"]
+            await asyncio.gather(task, return_exceptions=True)
+
+            assert "user_1" not in agent.processing_info
+            assert self._sessions(registry, agent) == 0.0
+
+        with patch("providers.base.rtc.AudioStream", return_value=_BlockingStream()):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            assert "user_1" in agent.processing_info
+            await _drain(agent.processing_info["user_1"]["task"])
+
+
+class TestMicrophoneTrackSelection:
+    """The agent transcribes microphones. Screenshare audio is subscribed too,
+    because the room is joined with AutoSubscribe.AUDIO_ONLY."""
+
+    def _participant_with_screenshare_first(self):
+        participant = _stub_participant()
+        participant.track_publications = {
+            "screen": _audio_publication(
+                source=rtc.TrackSource.SOURCE_SCREENSHARE_AUDIO, sid="TR_screen"
+            ),
+            "mic": _audio_publication(sid="TR_mic"),
+        }
+        return participant
+
+    def test_ignores_screenshare_audio_when_choosing_a_track(self):
+        agent, _ = _make_instrumented_agent()
+        participant = self._participant_with_screenshare_first()
+
+        track = agent._find_audio_track(participant)
+
+        assert track is participant.track_publications["mic"].track
+
+    async def test_unsubscribing_screenshare_audio_leaves_the_session_running(self):
+        agent, registry = _make_instrumented_agent()
+        participant = self._participant_with_screenshare_first()
+        agent.room = MagicMock()
+        agent.room.remote_participants = {"p": participant}
+
+        with patch("providers.base.rtc.AudioStream", return_value=_BlockingStream()):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            task = agent.processing_info["user_1"]["task"]
+
+            screen = participant.track_publications["screen"]
+            agent._on_track_unsubscribed(screen.track, screen, participant)
+
+            assert "user_1" in agent.processing_info
+            assert (
+                registry.get_sample_value(
+                    "bbb_stt_active_sessions",
+                    {"provider": agent.provider_name, "locale": "pt-BR"},
+                )
+                == 1.0
+            )
+            await _drain(task)
+
+    async def test_unsubscribing_the_session_track_stops_it(self):
+        agent, _ = _make_instrumented_agent()
+        participant = self._participant_with_screenshare_first()
+        agent.room = MagicMock()
+        agent.room.remote_participants = {"p": participant}
+
+        with patch("providers.base.rtc.AudioStream", return_value=_BlockingStream()):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            task = agent.processing_info["user_1"]["task"]
+
+            mic = participant.track_publications["mic"]
+            agent._on_track_unsubscribed(mic.track, mic, participant)
+
+            assert "user_1" not in agent.processing_info
+            await _drain(task)
