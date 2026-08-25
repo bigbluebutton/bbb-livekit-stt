@@ -229,13 +229,11 @@ class BaseSttAgent(EventEmitter, ABC):
     ):
         """Apply a BBB speech-locale change to a participant's session.
 
-        Only a complete pair means "transcribe": the html5 client clears both
-        fields when a user unassigns their language, while other producers
-        (a plugin pausing transcription) clear the locale and leave the provider
-        filled, and akka passes either through verbatim. So anything short of
-        both means "turn it off"; everything else is a request for transcription
-        in `locale` — adjust the session in place when one is running, start one
-        otherwise.
+        A locale and a provider together mean "transcribe in `locale`": move a
+        running session to it, or start one. Anything less means "turn it off".
+        The html5 client sends both incomplete shapes — the transcription toggle
+        clears the locale, the Audio Settings select clears both — and akka
+        passes them through verbatim.
         """
         if not (locale and provider):
             self.disable_transcription_for_user(user_id)

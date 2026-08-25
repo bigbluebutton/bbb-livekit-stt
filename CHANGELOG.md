@@ -37,6 +37,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 * feat(voxtral): Voxtral Realtime STT provider with concurrent streaming and Silero neural VAD on Python 3.11
 * docs: document Prometheus metrics and their operational caveats
 * docs: document the transcription session lifecycle contracts
+* docs: correct the session lifecycle and locale-change contracts
 
 ## v0.3.0
 
