@@ -1055,3 +1055,154 @@ class TestLocaleUpdateFailure:
         agent.update_locale_for_user("user_1", "en-US")
 
         assert agent.participant_settings["user_1"]["locale"] == "en-US"
+
+
+class _ScriptedSttStream:
+    """Provider stream that yields the transcripts a test hands it."""
+
+    def __init__(self):
+        self.queue = asyncio.Queue()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        return await self.queue.get()
+
+    def push_frame(self, frame):
+        pass
+
+    def flush(self):
+        pass
+
+    def end_input(self):
+        pass
+
+    async def aclose(self):
+        pass
+
+    def speak(self, start_time):
+        """Queue a final transcript at an offset within this stream's session."""
+        self.queue.put_nowait(
+            stt.SpeechEvent(
+                type=stt.SpeechEventType.FINAL_TRANSCRIPT,
+                alternatives=[
+                    stt.SpeechData(
+                        text="teste",
+                        language="pt",
+                        start_time=start_time,
+                        end_time=start_time + 1,
+                    )
+                ],
+            )
+        )
+
+
+class TestTranscriptEpoch:
+    """A provider reports offsets within its own stream. Turning them into wall
+    clock needs the moment that stream opened — which belongs to the session, not
+    to the agent that serves the whole room."""
+
+    def _scripted_agent(self, identities):
+        class ScriptedAgent(StubSttAgent):
+            def _create_stt_stream(self, locale):
+                return _ScriptedSttStream()
+
+        agent = ScriptedAgent(BaseSttConfig(), metrics=SttMetrics(CollectorRegistry()))
+        participants = {}
+        for index, identity in enumerate(identities):
+            participant = _stub_participant(identity)
+            participant.track_publications = {
+                "mic": _audio_publication(sid=f"TR_{index}")
+            }
+            participants[identity] = participant
+        agent.room = MagicMock()
+        agent.room.remote_participants = participants
+        return agent
+
+    async def test_a_new_session_leaves_another_session_epoch_alone(self):
+        """Regression: every session read the same open_time, so a participant
+        joining late pushed everyone else's transcripts into the future."""
+        clock = [1_000_000.0]
+        agent = self._scripted_agent(["alice", "bob"])
+        published = []
+
+        async def record(participant, event, open_time):
+            published.append(
+                (participant.identity, open_time + event.alternatives[0].start_time)
+            )
+
+        agent.on("final_transcript", record)
+
+        with (
+            patch(
+                "providers.base.rtc.AudioStream",
+                side_effect=lambda *_, **__: _BlockingStream(),
+            ),
+            patch("providers.base.time.time", lambda: clock[0]),
+        ):
+            agent.handle_speech_locale_change("alice", "pt-BR", "gladia")
+            alice_stream = agent.processing_info["alice"]["stream"]
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+            # Alice speaks five seconds into her own session.
+            alice_stream.speak(5.0)
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+            # Bob joins four hundred seconds later.
+            clock[0] += 400
+            agent.handle_speech_locale_change("bob", "pt-BR", "gladia")
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+            # Alice speaks again, still measured from her own session's start.
+            alice_stream.speak(410.0)
+            for _ in range(4):
+                await asyncio.sleep(0)
+
+            tasks = [info["task"] for info in agent.processing_info.values()]
+
+        assert published == [
+            ("alice", 1_000_005.0),
+            ("alice", 1_000_410.0),
+        ]
+        await _drain(*tasks)
+
+    async def test_each_session_stamps_from_its_own_start(self):
+        clock = [1_000_000.0]
+        agent = self._scripted_agent(["alice", "bob"])
+        published = []
+
+        async def record(participant, event, open_time):
+            published.append(
+                (participant.identity, open_time + event.alternatives[0].start_time)
+            )
+
+        agent.on("final_transcript", record)
+
+        with (
+            patch(
+                "providers.base.rtc.AudioStream",
+                side_effect=lambda *_, **__: _BlockingStream(),
+            ),
+            patch("providers.base.time.time", lambda: clock[0]),
+        ):
+            agent.handle_speech_locale_change("alice", "pt-BR", "gladia")
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+            clock[0] += 400
+            agent.handle_speech_locale_change("bob", "pt-BR", "gladia")
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+            agent.processing_info["bob"]["stream"].speak(2.0)
+            for _ in range(4):
+                await asyncio.sleep(0)
+
+            tasks = [info["task"] for info in agent.processing_info.values()]
+
+        assert published == [("bob", 1_000_402.0)]
+        await _drain(*tasks)
