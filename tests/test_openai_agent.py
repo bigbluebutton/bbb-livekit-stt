@@ -183,8 +183,11 @@ class TestRunTranscriptionPipeline:
         mock_audio_stream = AsyncMock()
         mock_audio_stream.__aiter__.side_effect = asyncio.CancelledError
 
-        # The pipeline only clears an entry it still owns.
-        agent.processing_info["user_1"] = {"task": asyncio.current_task()}
+        # The keys the pipeline's cleanup reads; see _release_session_slot().
+        agent.processing_info["user_1"] = {
+            "task": asyncio.current_task(),
+            "metrics_locale": "en-US",
+        }
 
         with patch("providers.openai.rtc.AudioStream", return_value=mock_audio_stream):
             await agent._run_transcription_pipeline(mock_participant, mock_track, "en")
@@ -271,8 +274,11 @@ class TestRunTranscriptionPipeline:
         mock_audio_stream = AsyncMock()
         mock_audio_stream.__aiter__.side_effect = RuntimeError("boom")
 
-        # The pipeline only clears an entry it still owns.
-        agent.processing_info["user_1"] = {"task": asyncio.current_task()}
+        # The keys the pipeline's cleanup reads; see _release_session_slot().
+        agent.processing_info["user_1"] = {
+            "task": asyncio.current_task(),
+            "metrics_locale": "en-US",
+        }
 
         with patch("providers.openai.rtc.AudioStream", return_value=mock_audio_stream):
             await agent._run_transcription_pipeline(mock_participant, mock_track, "en")

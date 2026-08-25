@@ -376,16 +376,13 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
             logging.info(
                 f"Voxtral Realtime transcription for {participant.identity} cancelled."
             )
+        except Exception as e:
+            logging.error(
+                f"Voxtral Realtime error for {participant.identity}: {e}",
+                exc_info=True,
+            )
         finally:
-            # Deregister only if this task still owns the entry: a locale
-            # change (stop→start) registers the replacement task before this
-            # cancelled task runs its finally block, so an unconditional pop
-            # would deregister the replacement — leaving it running but
-            # untracked (unstoppable, and a later start would spawn a
-            # duplicate pipeline on the same track).
-            info = self.processing_info.get(participant.identity)
-            if info and info.get("task") is asyncio.current_task():
-                self.processing_info.pop(participant.identity, None)
+            self._release_session_slot(participant.identity)
 
     async def _vad_loop(
         self,

@@ -1965,3 +1965,52 @@ class TestVoxtralSessionMetrics:
             )
             == 1.0
         )
+
+
+class TestSessionGaugeOnSelfEnd:
+    """A pipeline that ends on its own decrements its gauge through
+    _release_session_slot(), as the base and OpenAI pipelines do."""
+
+    def _gauge(self, registry):
+        return registry.get_sample_value(
+            "bbb_stt_active_sessions",
+            {"provider": "voxtral-realtime", "locale": "en-US"},
+        )
+
+    async def _start_and_wait(self, agent):
+        agent.start_transcription_for_user("user_1", "en-US", "voxtral-realtime")
+        task = agent.processing_info["user_1"]["task"]
+        await asyncio.wait_for(task, timeout=5.0)
+        return task
+
+    async def test_handshake_give_up_returns_the_gauge(self, monkeypatch):
+        monkeypatch.setattr("providers.voxtral_realtime._HANDSHAKE_GIVE_UP_S", 0.0)
+        agent, registry = _make_metered_agent({"p": _make_participant("user_1")})
+        session = MagicMock()
+        session.ws_connect = MagicMock(
+            return_value=_ws_context(_ScriptedWs([_binary_ws_msg()]))
+        )
+        agent._http_session = session
+        audio_stream = MagicMock()
+        audio_stream.aclose = AsyncMock()
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream", return_value=audio_stream
+        ):
+            await self._start_and_wait(agent)
+
+        assert "user_1" not in agent.processing_info
+        assert self._gauge(registry) == 0.0
+
+    async def test_audio_stream_failure_returns_the_gauge(self):
+        agent, registry = _make_metered_agent({"p": _make_participant("user_1")})
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream",
+            side_effect=RuntimeError("native handle failed"),
+        ):
+            task = await self._start_and_wait(agent)
+
+        assert task.exception() is None
+        assert "user_1" not in agent.processing_info
+        assert self._gauge(registry) == 0.0

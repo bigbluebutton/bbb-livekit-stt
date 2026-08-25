@@ -235,15 +235,23 @@ class BaseSttAgent(EventEmitter, ABC):
             logging.info(f"Stopped transcription for user {user_id}.")
 
     def _release_session_slot(self, user_id: str):
-        """Clear a finished pipeline's own entry from processing_info.
+        """Close out a finished pipeline's own session.
 
         Called from the pipeline task itself. A session that replaced it while
-        it was being cancelled owns the slot by then, and popping that one would
+        it was being cancelled owns the slot by then. Closing that one would
         strand a running pipeline the agent can no longer stop or account for.
+
+        Only a pipeline that ended by itself (the provider dropped the
+        connection, or the audio ran out) still owns its slot here, so this is
+        where its gauge is returned. The stop path removes the entry first and
+        returns the gauge itself.
         """
         info = self.processing_info.get(user_id)
-        if info is not None and info["task"] is asyncio.current_task():
-            del self.processing_info[user_id]
+        if info is None or info["task"] is not asyncio.current_task():
+            return
+
+        del self.processing_info[user_id]
+        self.metrics.session_stopped(self.provider_name, info["metrics_locale"])
 
     def update_locale_for_user(self, user_id: str, locale: str):
         if user_id in self.participant_settings:
@@ -334,7 +342,7 @@ class BaseSttAgent(EventEmitter, ABC):
         track: rtc.Track,
         stt_stream: stt.SpeechStream,
     ):
-        audio_stream = rtc.AudioStream(track)
+        audio_stream = None
         self.open_time = time.time()
 
         async def forward_audio_task():
@@ -374,6 +382,7 @@ class BaseSttAgent(EventEmitter, ABC):
                         )
 
         try:
+            audio_stream = rtc.AudioStream(track)
             await asyncio.gather(forward_audio_task(), process_stt_task())
         except asyncio.CancelledError:
             logging.info(f"Transcription for {participant.identity} was cancelled.")

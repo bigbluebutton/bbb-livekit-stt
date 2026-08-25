@@ -371,8 +371,9 @@ class TestRunTranscriptionPipeline:
 
         agent.processing_info["user_1"] = {
             "stream": mock_stt_stream,
-            # The pipeline only clears an entry it still owns.
+            # The keys the pipeline's cleanup reads; see _release_session_slot().
             "task": asyncio.current_task(),
+            "metrics_locale": "en-US",
         }
 
         with patch("providers.base.rtc.AudioStream", return_value=mock_audio_stream):
@@ -479,8 +480,9 @@ class TestRunTranscriptionPipeline:
 
         agent.processing_info["user_1"] = {
             "stream": mock_stt_stream,
-            # The pipeline only clears an entry it still owns.
+            # The keys the pipeline's cleanup reads; see _release_session_slot().
             "task": asyncio.current_task(),
+            "metrics_locale": "en-US",
         }
 
         with patch("providers.base.rtc.AudioStream", return_value=mock_audio_stream):
