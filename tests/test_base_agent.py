@@ -375,13 +375,21 @@ class TestRecognitionUsage:
 
 
 class _BlockingStream:
-    """Async iterator that blocks forever, keeping a pipeline alive until cancelled."""
+    """Async iterator that blocks until its input is ended or it is closed.
+
+    Models the provider stream contract: a recognizer keeps yielding until the
+    pipeline tells it no more audio is coming.
+    """
+
+    def __init__(self):
+        self.closed = False
+        self._ended = asyncio.Event()
 
     def __aiter__(self):
         return self
 
     async def __anext__(self):
-        await asyncio.Event().wait()
+        await self._ended.wait()
         raise StopAsyncIteration
 
     def push_frame(self, frame):
@@ -390,8 +398,12 @@ class _BlockingStream:
     def flush(self):
         pass
 
+    def end_input(self):
+        self._ended.set()
+
     async def aclose(self):
-        pass
+        self.closed = True
+        self._ended.set()
 
 
 def _agent_with_participant(identity="user_1"):
@@ -604,7 +616,10 @@ class TestSpeechLocaleChangeDispatch:
         agent.room = MagicMock()
         agent.room.remote_participants = {"p": _with_audio_track(_stub_participant())}
 
-        with patch("providers.base.rtc.AudioStream", return_value=_BlockingStream()):
+        with patch(
+            "providers.base.rtc.AudioStream",
+            side_effect=lambda *_, **__: _BlockingStream(),
+        ):
             agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
             first = agent.processing_info["user_1"]["task"]
 
@@ -766,7 +781,10 @@ class TestSessionAccountingWhenAPipelineDies:
         agent.room = MagicMock()
         agent.room.remote_participants = {"p": _with_audio_track(_stub_participant())}
 
-        with patch("providers.base.rtc.AudioStream", return_value=_BlockingStream()):
+        with patch(
+            "providers.base.rtc.AudioStream",
+            side_effect=lambda *_, **__: _BlockingStream(),
+        ):
             agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
             task = agent.processing_info["user_1"]["task"]
 
@@ -791,7 +809,10 @@ class TestSessionAccountingWhenAPipelineDies:
         agent.room = MagicMock()
         agent.room.remote_participants = {"p": _with_audio_track(_stub_participant())}
 
-        with patch("providers.base.rtc.AudioStream", return_value=_BlockingStream()):
+        with patch(
+            "providers.base.rtc.AudioStream",
+            side_effect=lambda *_, **__: _BlockingStream(),
+        ):
             agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
             first = agent.processing_info["user_1"]["task"]
 
@@ -825,7 +846,10 @@ class TestSessionAccountingWhenAPipelineDies:
             assert "user_1" not in agent.processing_info
             assert self._sessions(registry, agent) == 0.0
 
-        with patch("providers.base.rtc.AudioStream", return_value=_BlockingStream()):
+        with patch(
+            "providers.base.rtc.AudioStream",
+            side_effect=lambda *_, **__: _BlockingStream(),
+        ):
             agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
             assert "user_1" in agent.processing_info
             await _drain(agent.processing_info["user_1"]["task"])
@@ -859,7 +883,10 @@ class TestMicrophoneTrackSelection:
         agent.room = MagicMock()
         agent.room.remote_participants = {"p": participant}
 
-        with patch("providers.base.rtc.AudioStream", return_value=_BlockingStream()):
+        with patch(
+            "providers.base.rtc.AudioStream",
+            side_effect=lambda *_, **__: _BlockingStream(),
+        ):
             agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
             task = agent.processing_info["user_1"]["task"]
 
@@ -882,7 +909,10 @@ class TestMicrophoneTrackSelection:
         agent.room = MagicMock()
         agent.room.remote_participants = {"p": participant}
 
-        with patch("providers.base.rtc.AudioStream", return_value=_BlockingStream()):
+        with patch(
+            "providers.base.rtc.AudioStream",
+            side_effect=lambda *_, **__: _BlockingStream(),
+        ):
             agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
             task = agent.processing_info["user_1"]["task"]
 
@@ -891,3 +921,86 @@ class TestMicrophoneTrackSelection:
 
             assert "user_1" not in agent.processing_info
             await _drain(task)
+
+
+class TestStreamTeardown:
+    """Cancelling the pipeline task ends the coroutine; it does not release the
+    provider websocket or the audio stream's native handle."""
+
+    def _closing_agent(self):
+        class ClosingAgent(StubSttAgent):
+            def _create_stt_stream(self, locale):
+                return _BlockingStream()
+
+        agent = ClosingAgent(BaseSttConfig(), metrics=SttMetrics(CollectorRegistry()))
+        agent.room = MagicMock()
+        agent.room.remote_participants = {"p": _with_audio_track(_stub_participant())}
+        return agent
+
+    async def test_closes_both_streams_when_a_session_is_stopped(self):
+        agent = self._closing_agent()
+        audio_stream = _BlockingStream()
+
+        with patch("providers.base.rtc.AudioStream", return_value=audio_stream):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            task = agent.processing_info["user_1"]["task"]
+            stt_stream = agent.processing_info["user_1"]["stream"]
+
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+            agent.handle_speech_locale_change("user_1", "", "")
+            await asyncio.gather(task, return_exceptions=True)
+
+        assert audio_stream.closed
+        assert stt_stream.closed
+
+    async def test_an_exhausted_audio_track_ends_the_session(self):
+        """When the audio runs out the provider has to be told, or the pipeline
+        waits on a recognizer that will never speak again."""
+        agent = self._closing_agent()
+
+        with patch("providers.base.rtc.AudioStream", return_value=_EndingStream()):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            task = agent.processing_info["user_1"]["task"]
+            stt_stream = agent.processing_info["user_1"]["stream"]
+            await asyncio.wait_for(asyncio.shield(task), timeout=2)
+
+        assert stt_stream.closed
+        assert "user_1" not in agent.processing_info
+
+    async def test_a_failing_close_does_not_break_the_teardown(self):
+        """The session is over either way; a close that raises must not take the
+        gauge decrement or the slot release down with it."""
+
+        class UnclosableStream(_BlockingStream):
+            async def aclose(self):
+                raise RuntimeError("already gone")
+
+        class UnclosableAgent(StubSttAgent):
+            def _create_stt_stream(self, locale):
+                return UnclosableStream()
+
+        registry = CollectorRegistry()
+        agent = UnclosableAgent(BaseSttConfig(), metrics=SttMetrics(registry))
+        agent.room = MagicMock()
+        agent.room.remote_participants = {"p": _with_audio_track(_stub_participant())}
+
+        with patch("providers.base.rtc.AudioStream", return_value=UnclosableStream()):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            task = agent.processing_info["user_1"]["task"]
+
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+            agent.handle_speech_locale_change("user_1", "", "")
+            await asyncio.gather(task, return_exceptions=True)
+
+        assert "user_1" not in agent.processing_info
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_active_sessions",
+                {"provider": agent.provider_name, "locale": "pt-BR"},
+            )
+            == 0.0
+        )
