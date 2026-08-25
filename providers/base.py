@@ -223,11 +223,20 @@ class BaseSttAgent(EventEmitter, ABC):
     def stop_transcription_for_user(self, user_id: str):
         logging.debug(f"Stopping transcription for {user_id}.")
 
-        if user_id in self.processing_info:
-            info = self.processing_info.pop(user_id)
-            info["task"].cancel()
-            self.metrics.session_stopped(self.provider_name, info["metrics_locale"])
-            logging.info(f"Stopped transcription for user {user_id}.")
+        if user_id not in self.processing_info:
+            return
+
+        info = self.processing_info.pop(user_id)
+        info["task"].cancel()
+        self.metrics.session_stopped(self.provider_name, info["metrics_locale"])
+
+        # A pipeline cancelled before its first step never runs its own teardown,
+        # and the stream it was handed is already connected to the provider. Close
+        # it here, or it stays open — and billed — for the life of the room job.
+        if not info.get("started") and info.get("stream") is not None:
+            asyncio.ensure_future(self._close_stream(info["stream"]))
+
+        logging.info(f"Stopped transcription for user {user_id}.")
 
     def _release_session_slot(self, user_id: str):
         """Close out a finished pipeline's own session.
@@ -381,6 +390,12 @@ class BaseSttAgent(EventEmitter, ABC):
         stt_stream: stt.SpeechStream,
     ):
         audio_stream = None
+        # From here on this pipeline closes its own streams; see
+        # stop_transcription_for_user().
+        info = self.processing_info.get(participant.identity)
+        if info is not None and info["task"] is asyncio.current_task():
+            info["started"] = True
+
         # The provider reports offsets within this stream, so its open time turns
         # them into wall clock. It is per session: a shared one would be
         # overwritten by the next session to start.

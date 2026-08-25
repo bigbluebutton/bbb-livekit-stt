@@ -166,6 +166,10 @@ class OpenAiSttAgent(BaseSttAgent):
         backends that implement the OpenAI Realtime API.
         """
         audio_stream = None
+        info = self.processing_info.get(participant.identity)
+        if info is not None and info["task"] is asyncio.current_task():
+            info["started"] = True
+
         open_time = time.time()
 
         speech_buffer: list[rtc.AudioFrame] = []
