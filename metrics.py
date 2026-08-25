@@ -80,6 +80,12 @@ class SttMetrics:
             ["provider", "reason"],
             registry=registry,
         )
+        self.locale_update_failures = Counter(
+            "bbb_stt_locale_update_failures_total",
+            "Locale changes an active session's provider stream did not accept",
+            ["provider"],
+            registry=registry,
+        )
         self.agent_start_failures = Counter(
             "bbb_stt_agent_start_failures_total",
             "STT agents that could not be established",
@@ -158,6 +164,13 @@ class SttMetrics:
 
     def session_start_failed(self, provider: str, reason: str) -> None:
         self.session_start_failures.labels(provider=provider, reason=reason).inc()
+
+    def locale_update_failed(self, provider: str) -> None:
+        """A running session could not be moved to a newly requested locale.
+
+        The session keeps transcribing in the locale it already had.
+        """
+        self.locale_update_failures.labels(provider=provider).inc()
 
     def session_locale_changed(
         self, provider: str, old_locale: str, new_locale: str

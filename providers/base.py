@@ -260,16 +260,35 @@ class BaseSttAgent(EventEmitter, ABC):
         self.metrics.session_stopped(self.provider_name, info["metrics_locale"])
 
     def update_locale_for_user(self, user_id: str, locale: str):
-        if user_id in self.participant_settings:
-            self.participant_settings[user_id]["locale"] = locale
+        settings = self.participant_settings.get(user_id)
 
-        if user_id in self.processing_info:
-            logging.info(f"Updating locale to '{locale}' for user {user_id}.")
-            self._update_stream_locale(user_id, locale)
-        else:
+        if user_id not in self.processing_info:
             logging.warning(
                 f"Won't update locale, no active transcription for user {user_id}."
             )
+            # Still worth recording: it is what the next track subscription
+            # starts transcription from.
+            if settings is not None:
+                settings["locale"] = locale
+            return
+
+        logging.info(f"Updating locale to '{locale}' for user {user_id}.")
+
+        try:
+            self._update_stream_locale(user_id, locale)
+        except Exception as e:
+            # Storing the locale anyway would publish transcripts under a
+            # language the provider is not transcribing in, and leave the
+            # participant stuck: the dispatch reads the stored locale, so asking
+            # for the same one again would look like a no-op.
+            logging.warning(
+                f"Could not update locale to '{locale}' for user {user_id}: {e}"
+            )
+            self.metrics.locale_update_failed(self.provider_name)
+            return
+
+        if settings is not None:
+            settings["locale"] = locale
 
     def _on_track_subscribed(
         self,
