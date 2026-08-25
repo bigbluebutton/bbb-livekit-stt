@@ -127,7 +127,7 @@ class OpenAiSttAgent(BaseSttAgent):
 
         language = self._sanitize_locale(locale)
         task = self._spawn_pipeline(
-            self._run_transcription_pipeline(participant, track, language)
+            self._run_transcription_pipeline(participant, track, language, locale)
         )
         self.processing_info[participant.identity] = {
             "task": task,
@@ -155,6 +155,7 @@ class OpenAiSttAgent(BaseSttAgent):
         participant: rtc.RemoteParticipant,
         track: rtc.Track,
         language: str | None,
+        locale: str,
     ):
         """Collect audio, segment by silence, and transcribe via REST API.
 
@@ -206,6 +207,7 @@ class OpenAiSttAgent(BaseSttAgent):
                         participant=participant,
                         event=event,
                         open_time=open_time,
+                        locale=locale,
                     )
             except asyncio.CancelledError:
                 raise

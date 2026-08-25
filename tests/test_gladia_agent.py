@@ -358,7 +358,7 @@ class TestRunTranscriptionPipeline:
 
         with patch("providers.base.rtc.AudioStream", return_value=mock_audio_stream):
             await agent._run_transcription_pipeline(
-                mock_participant, mock_track, mock_stt_stream
+                mock_participant, mock_track, mock_stt_stream, "pt-BR"
             )
 
         assert "user_1" not in agent.processing_info
@@ -385,7 +385,7 @@ class TestRunTranscriptionPipeline:
 
         with patch("providers.base.rtc.AudioStream", return_value=mock_audio_stream):
             await agent._run_transcription_pipeline(
-                mock_participant, mock_track, mock_stt_stream
+                mock_participant, mock_track, mock_stt_stream, "pt-BR"
             )
             await asyncio.sleep(0)
 
@@ -413,7 +413,7 @@ class TestRunTranscriptionPipeline:
 
         with patch("providers.base.rtc.AudioStream", return_value=mock_audio_stream):
             await agent._run_transcription_pipeline(
-                mock_participant, mock_track, mock_stt_stream
+                mock_participant, mock_track, mock_stt_stream, "pt-BR"
             )
             await asyncio.sleep(0)
 
@@ -439,7 +439,7 @@ class TestRunTranscriptionPipeline:
 
         with patch("providers.base.rtc.AudioStream", return_value=mock_audio_stream):
             await agent._run_transcription_pipeline(
-                mock_participant, mock_track, mock_stt_stream
+                mock_participant, mock_track, mock_stt_stream, "pt-BR"
             )
             await asyncio.sleep(0)
 
@@ -467,7 +467,7 @@ class TestRunTranscriptionPipeline:
 
         with patch("providers.base.rtc.AudioStream", return_value=mock_audio_stream):
             await agent._run_transcription_pipeline(
-                mock_participant, mock_track, mock_stt_stream
+                mock_participant, mock_track, mock_stt_stream, "pt-BR"
             )
 
         assert "user_1" not in agent.processing_info

@@ -70,7 +70,7 @@ class TestShouldEmitIntegration:
 
         with patch("providers.base.rtc.AudioStream", return_value=mock_audio_stream):
             await agent._run_transcription_pipeline(
-                mock_participant, mock_track, mock_stt_stream
+                mock_participant, mock_track, mock_stt_stream, "pt-BR"
             )
             await asyncio.sleep(0)
 
@@ -95,7 +95,7 @@ class TestShouldEmitIntegration:
 
         with patch("providers.base.rtc.AudioStream", return_value=mock_audio_stream):
             await agent._run_transcription_pipeline(
-                mock_participant, mock_track, mock_stt_stream
+                mock_participant, mock_track, mock_stt_stream, "pt-BR"
             )
             await asyncio.sleep(0)
 
@@ -357,7 +357,9 @@ class TestRecognitionUsage:
         agent.on("interim_transcript", collect)
 
         with patch("providers.base.rtc.AudioStream", return_value=mock_audio_stream):
-            await agent._run_transcription_pipeline(participant, track, mock_stt_stream)
+            await agent._run_transcription_pipeline(
+                participant, track, mock_stt_stream, "pt-BR"
+            )
         await asyncio.sleep(0)
 
         assert (
@@ -379,6 +381,7 @@ class _BlockingStream:
 
     def __init__(self):
         self.closed = False
+        self.closes = 0
         self._ended = asyncio.Event()
 
     def __aiter__(self):
@@ -399,6 +402,7 @@ class _BlockingStream:
 
     async def aclose(self):
         self.closed = True
+        self.closes += 1
         self._ended.set()
 
 
@@ -1004,6 +1008,93 @@ class TestStreamTeardown:
         assert audio_stream.closed
         assert stt_stream.closed
 
+    async def test_a_provider_that_ends_first_ends_the_session(self):
+        """A provider can close its side while the participant is muted, so the
+        audio leg is parked rather than finished. Waiting for both legs then
+        never returns: the session is held, the gauge reads healthy, and nothing
+        is being transcribed."""
+
+        class EndingProviderAgent(StubSttAgent):
+            def _create_stt_stream(self, locale):
+                return _EndingStream()
+
+        registry = CollectorRegistry()
+        agent = EndingProviderAgent(BaseSttConfig(), metrics=SttMetrics(registry))
+        agent.room = MagicMock()
+        agent.room.remote_participants = {"p": _with_audio_track(_stub_participant())}
+
+        with patch(
+            "providers.base.rtc.AudioStream",
+            side_effect=lambda *_, **__: _BlockingStream(),
+        ):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            task = agent.processing_info["user_1"]["task"]
+
+            await asyncio.wait_for(asyncio.shield(task), timeout=2)
+
+        assert "user_1" not in agent.processing_info
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_active_sessions",
+                {"provider": agent.provider_name, "locale": "pt-BR"},
+            )
+            == 0.0
+        )
+
+    async def test_closes_a_stream_whose_pipeline_never_ran(self):
+        """A task cancelled before its first step never runs its own teardown.
+        The reason the stop closes its stream is at stop_transcription_for_user()."""
+
+        class ClosingAgent(StubSttAgent):
+            def _create_stt_stream(self, locale):
+                return _BlockingStream()
+
+        agent = ClosingAgent(BaseSttConfig(), metrics=SttMetrics(CollectorRegistry()))
+        agent.room = MagicMock()
+        agent.room.remote_participants = {"p": _with_audio_track(_stub_participant())}
+
+        with patch(
+            "providers.base.rtc.AudioStream",
+            side_effect=lambda *_, **__: _BlockingStream(),
+        ):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            task = agent.processing_info["user_1"]["task"]
+            stt_stream = agent.processing_info["user_1"]["stream"]
+
+            # Same event loop turn: the pipeline has not run a single step.
+            agent.handle_speech_locale_change("user_1", "", "")
+            await asyncio.gather(task, return_exceptions=True)
+
+        assert stt_stream.closed
+
+    async def test_a_running_pipeline_closes_its_stream_once(self):
+        """The pipeline owns the teardown once it is running; the stop path must
+        not close the same stream a second time."""
+
+        class ClosingAgent(StubSttAgent):
+            def _create_stt_stream(self, locale):
+                return _BlockingStream()
+
+        agent = ClosingAgent(BaseSttConfig(), metrics=SttMetrics(CollectorRegistry()))
+        agent.room = MagicMock()
+        agent.room.remote_participants = {"p": _with_audio_track(_stub_participant())}
+
+        with patch(
+            "providers.base.rtc.AudioStream",
+            side_effect=lambda *_, **__: _BlockingStream(),
+        ):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            task = agent.processing_info["user_1"]["task"]
+            stt_stream = agent.processing_info["user_1"]["stream"]
+
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+            agent.handle_speech_locale_change("user_1", "", "")
+            await asyncio.gather(task, return_exceptions=True)
+
+        assert stt_stream.closes == 1
+
     async def test_an_exhausted_audio_track_ends_the_session(self):
         """When the audio runs out the provider has to be told, or the pipeline
         waits on a recognizer that will never speak again."""
@@ -1196,7 +1287,7 @@ class TestTranscriptEpoch:
         agent = self._scripted_agent(["alice", "bob"])
         published = []
 
-        async def record(participant, event, open_time):
+        async def record(participant, event, open_time, locale):
             published.append(
                 (participant.identity, open_time + event.alternatives[0].start_time)
             )
@@ -1244,7 +1335,7 @@ class TestTranscriptEpoch:
         agent = self._scripted_agent(["alice", "bob"])
         published = []
 
-        async def record(participant, event, open_time):
+        async def record(participant, event, open_time, locale):
             published.append(
                 (participant.identity, open_time + event.alternatives[0].start_time)
             )

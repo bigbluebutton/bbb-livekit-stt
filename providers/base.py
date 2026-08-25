@@ -208,7 +208,7 @@ class BaseSttAgent(EventEmitter, ABC):
             raise
 
         task = self._spawn_pipeline(
-            self._run_transcription_pipeline(participant, track, stt_stream)
+            self._run_transcription_pipeline(participant, track, stt_stream, locale)
         )
         self.processing_info[participant.identity] = {
             "stream": stt_stream,
@@ -443,6 +443,7 @@ class BaseSttAgent(EventEmitter, ABC):
         participant: rtc.RemoteParticipant,
         track: rtc.Track,
         stt_stream: stt.SpeechStream,
+        locale: str,
     ):
         audio_stream = None
         # From here on this pipeline closes its own streams; see
@@ -477,6 +478,7 @@ class BaseSttAgent(EventEmitter, ABC):
                         participant=participant,
                         event=event,
                         open_time=open_time,
+                        locale=locale,
                     )
                 elif (
                     event.type == stt.SpeechEventType.INTERIM_TRANSCRIPT
@@ -487,6 +489,7 @@ class BaseSttAgent(EventEmitter, ABC):
                         participant=participant,
                         event=event,
                         open_time=open_time,
+                        locale=locale,
                     )
                 elif event.type == stt.SpeechEventType.RECOGNITION_USAGE:
                     # Metrics only: it must not reach the transcript handlers.

@@ -219,7 +219,7 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
 
         language = self._sanitize_locale(locale)
         task = self._spawn_pipeline(
-            self._run_transcription_pipeline(participant, track, language)
+            self._run_transcription_pipeline(participant, track, language, locale)
         )
         self.processing_info[participant.identity] = {
             "task": task,
@@ -243,6 +243,7 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
         participant: rtc.RemoteParticipant,
         track: rtc.Track,
         language: str | None,
+        locale: str,
     ):
         ws_url = self._build_ws_url()
         # A vLLM server started without VLLM_API_KEY takes anonymous requests,
@@ -308,7 +309,7 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                         )
 
                         await self._vad_loop(
-                            ws, audio_stream, participant, language, open_time
+                            ws, audio_stream, participant, language, locale, open_time
                         )
                         return  # clean exit — audio stream finished normally
 
@@ -381,6 +382,7 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
         audio_stream: rtc.AudioStream,
         participant: rtc.RemoteParticipant,
         language: str | None,
+        locale: str,
         open_time: float,
     ):
         # `language` only labels the transcripts this pipeline emits; it is
@@ -465,6 +467,7 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                     ],
                 ),
                 open_time=open_time,
+                locale=locale,
             )
 
         # ── Reader ────────────────────────────────────────────────────────────

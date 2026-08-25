@@ -116,6 +116,7 @@ class TestTranscriptPublication:
             participant=_participant(),
             event=_final_transcript(5.0, 6.5),
             open_time=1_000_000.0,
+            locale="pt-BR",
         )
         for _ in range(3):
             await asyncio.sleep(0)
@@ -143,12 +144,14 @@ class TestTranscriptPublication:
             participant=_participant("alice"),
             event=_final_transcript(410.0, 411.0),
             open_time=1_000_000.0,
+            locale="pt-BR",
         )
         agent.emit(
             "final_transcript",
             participant=_participant("bob"),
             event=_final_transcript(2.0, 3.0),
             open_time=1_000_400.0,
+            locale="pt-BR",
         )
         for _ in range(4):
             await asyncio.sleep(0)
@@ -176,6 +179,7 @@ class TestTranscriptPublication:
             participant=_participant(),
             event=interim,
             open_time=1_000_000.0,
+            locale="pt-BR",
         )
         for _ in range(3):
             await asyncio.sleep(0)
@@ -188,6 +192,7 @@ class TestTranscriptPublication:
             participant=_participant(),
             event=interim,
             open_time=1_000_000.0,
+            locale="pt-BR",
         )
         for _ in range(3):
             await asyncio.sleep(0)

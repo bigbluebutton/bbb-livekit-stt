@@ -14,7 +14,6 @@ from metrics import (
     AGENT_FAILURE_REDIS_CONNECT,
     AGENT_FAILURE_UNKNOWN_PROVIDER,
     DISCARD_BELOW_MIN_UTTERANCE_LENGTH,
-    DISCARD_MISSING_LOCALE,
     DISCARD_UNRESOLVABLE_LOCALE,
     EVENT_TYPE_FINAL,
     EVENT_TYPE_INTERIM,
@@ -113,18 +112,11 @@ async def entrypoint(ctx: JobContext):
         participant: rtc.RemoteParticipant,
         event: stt.SpeechEvent,
         open_time: float,
+        locale: str,
     ):
-        p_settings = agent.participant_settings.get(participant.identity, {})
-        original_locale = p_settings.get("locale")
-
-        if not original_locale:
-            logging.warning(
-                f"Could not find original locale for participant {participant.identity}, cannot process transcripts."
-            )
-            stt_metrics.transcript_discarded(
-                agent.provider_name, DISCARD_MISSING_LOCALE
-            )
-            return
+        # The locale comes with the transcript, as open_time does: the
+        # participant may have switched locale since this audio was transcribed.
+        original_locale = locale
 
         # "auto" means the provider detects the language, so there is no
         # selected language to fall back to when a transcript omits one.
@@ -206,22 +198,16 @@ async def entrypoint(ctx: JobContext):
         participant: rtc.RemoteParticipant,
         event: stt.SpeechEvent,
         open_time: float,
+        locale: str,
     ):
+        # Speech options are read live: the participant can change them at any
+        # time.
         p_settings = agent.participant_settings.get(participant.identity, {})
 
         if not p_settings.get("partial_utterances", False):
             return
 
-        original_locale = p_settings.get("locale")
-
-        if not original_locale:
-            logging.warning(
-                f"Could not find original locale for participant {participant.identity}, cannot process interim transcripts."
-            )
-            stt_metrics.transcript_discarded(
-                agent.provider_name, DISCARD_MISSING_LOCALE
-            )
-            return
+        original_locale = locale
 
         original_lang = (
             None if original_locale.lower() == "auto" else original_locale.split("-")[0]

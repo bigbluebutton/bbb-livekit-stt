@@ -167,7 +167,7 @@ class TestStartTranscriptionForUser:
             agent.start_transcription_for_user("user_1", "pt-BR", "openai")
             await asyncio.sleep(0)
 
-        mock_pipeline.assert_called_once_with(participant, mock_track, "pt")
+        mock_pipeline.assert_called_once_with(participant, mock_track, "pt", "pt-BR")
         agent.processing_info.pop("user_1", None)
 
     async def test_processing_info_has_no_stream_key(self):
@@ -203,7 +203,9 @@ class TestRunTranscriptionPipeline:
         }
 
         with patch("providers.openai.rtc.AudioStream", return_value=mock_audio_stream):
-            await agent._run_transcription_pipeline(mock_participant, mock_track, "en")
+            await agent._run_transcription_pipeline(
+                mock_participant, mock_track, "en", "en-US"
+            )
 
         assert "user_1" not in agent.processing_info
 
@@ -226,7 +228,7 @@ class TestRunTranscriptionPipeline:
         with patch("providers.openai.rtc.AudioStream", return_value=mock_audio_stream):
             with patch("providers.openai.rtc.combine_audio_frames"):
                 await agent._run_transcription_pipeline(
-                    mock_participant, mock_track, "en"
+                    mock_participant, mock_track, "en", "en-US"
                 )
             await asyncio.sleep(0)
 
@@ -254,7 +256,7 @@ class TestRunTranscriptionPipeline:
         with patch("providers.openai.rtc.AudioStream", return_value=mock_audio_stream):
             with patch("providers.openai.rtc.combine_audio_frames"):
                 await agent._run_transcription_pipeline(
-                    mock_participant, mock_track, "en"
+                    mock_participant, mock_track, "en", "en-US"
                 )
 
         assert len(emitted) == 0
@@ -273,7 +275,9 @@ class TestRunTranscriptionPipeline:
         agent._transcribe_wav = AsyncMock()
 
         with patch("providers.openai.rtc.AudioStream", return_value=mock_audio_stream):
-            await agent._run_transcription_pipeline(mock_participant, mock_track, "en")
+            await agent._run_transcription_pipeline(
+                mock_participant, mock_track, "en", "en-US"
+            )
 
         agent._transcribe_wav.assert_not_called()
 
@@ -294,7 +298,9 @@ class TestRunTranscriptionPipeline:
         }
 
         with patch("providers.openai.rtc.AudioStream", return_value=mock_audio_stream):
-            await agent._run_transcription_pipeline(mock_participant, mock_track, "en")
+            await agent._run_transcription_pipeline(
+                mock_participant, mock_track, "en", "en-US"
+            )
 
         assert "user_1" not in agent.processing_info
 
@@ -316,7 +322,7 @@ class TestRunTranscriptionPipeline:
         with patch("providers.openai.rtc.AudioStream", return_value=mock_audio_stream):
             with patch("providers.openai.rtc.combine_audio_frames"):
                 await agent._run_transcription_pipeline(
-                    mock_participant, mock_track, "en"
+                    mock_participant, mock_track, "en", "en-US"
                 )
             await asyncio.sleep(0)
 
@@ -548,7 +554,7 @@ class TestAutoLocale:
             agent.start_transcription_for_user("user_1", "auto", "openai")
             await asyncio.sleep(0)
 
-        mock_pipeline.assert_called_once_with(participant, mock_track, None)
+        mock_pipeline.assert_called_once_with(participant, mock_track, None, "auto")
         agent.processing_info.pop("user_1", None)
 
     async def test_transcribe_wav_omits_the_language_field(self):
@@ -580,7 +586,9 @@ class TestAutoLocale:
 
         with patch("providers.openai.rtc.AudioStream", return_value=mock_audio_stream):
             with patch("providers.openai.rtc.combine_audio_frames"):
-                await agent._run_transcription_pipeline(participant, MagicMock(), None)
+                await agent._run_transcription_pipeline(
+                    participant, MagicMock(), None, "auto"
+                )
             await asyncio.sleep(0)
 
         assert len(emitted) == 1
