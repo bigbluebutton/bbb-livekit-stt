@@ -2037,3 +2037,13 @@ class TestTrackScoping:
             await asyncio.sleep(0)
 
         assert "user_1" not in agent.processing_info
+
+
+class TestShutdownRefusesNewSessions:
+    def test_no_session_starts_once_shutdown_begins(self):
+        agent = _make_agent_with_room(participants={"p": _make_participant("user_1")})
+        agent._shutdown.set()
+
+        agent.start_transcription_for_user("user_1", "en-US", "voxtral-realtime")
+
+        assert "user_1" not in agent.processing_info

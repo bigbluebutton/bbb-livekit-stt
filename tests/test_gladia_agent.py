@@ -479,18 +479,20 @@ class TestCleanup:
         agent = _make_agent()
         tasks = {}
         for uid in ("user_1", "user_2", "user_3"):
-            mock_task = MagicMock()
+            # Real tasks: _cleanup waits for the pipelines it cancels.
+            task = agent._spawn_pipeline(asyncio.Event().wait())
             agent.processing_info[uid] = {
-                "task": mock_task,
+                "task": task,
                 "stream": MagicMock(),
+                "started": True,
                 "metrics_locale": "en-US",
             }
-            tasks[uid] = mock_task
+            tasks[uid] = task
 
         await agent._cleanup()
 
-        for uid, mock_task in tasks.items():
-            mock_task.cancel.assert_called_once()
+        for uid, task in tasks.items():
+            assert task.cancelled()
             assert uid not in agent.processing_info
 
 

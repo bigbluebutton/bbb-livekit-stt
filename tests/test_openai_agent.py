@@ -680,3 +680,16 @@ class TestOpenAiSessionMetrics:
             )
             == 1.0
         )
+
+
+class TestShutdownRefusesNewSessions:
+    def test_no_session_starts_once_shutdown_begins(self):
+        mock_track = MagicMock()
+        mock_track.kind = rtc.TrackKind.KIND_AUDIO
+        participant = _make_participant("user_1", audio_track=mock_track)
+        agent = _make_agent_with_room(participants={"pid": participant})
+        agent._shutdown.set()
+
+        agent.start_transcription_for_user("user_1", "en-US", "openai")
+
+        assert "user_1" not in agent.processing_info

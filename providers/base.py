@@ -24,6 +24,10 @@ from metrics import (
 )
 
 
+# How long a job's teardown waits for transcripts still being published.
+TRANSCRIPT_DRAIN_TIMEOUT_S = 5.0
+
+
 @dataclass
 class BaseSttConfig:
     interim_results: bool | None = None
@@ -46,6 +50,14 @@ class BaseSttAgent(EventEmitter, ABC):
         self.processing_info = {}
         self.participant_settings = {}
         self._shutdown = asyncio.Event()
+        # Set once start() has finished, or failed; shutdown() waits on it.
+        self._stopped = asyncio.Event()
+        self._started = False
+        # Every pipeline still running, including those the stop path already
+        # took out of processing_info, so shutdown can wait for them.
+        self._pipelines: set[asyncio.Task] = set()
+        # Stream closes started by the stop path, so shutdown can wait for them.
+        self._closing: set[asyncio.Future] = set()
 
     @property
     def reports_confidence(self) -> bool:
@@ -84,6 +96,27 @@ class BaseSttAgent(EventEmitter, ABC):
         return True
 
     async def start(self, ctx: JobContext):
+        if self._shutdown.is_set():
+            # The job was shut down before the agent got here: do not join.
+            return
+
+        self._started = True
+        try:
+            await self._run(ctx)
+        finally:
+            self._stopped.set()
+
+    async def shutdown(self):
+        """Stop the agent and wait until start() has torn it down.
+
+        LiveKit awaits a job's shutdown callbacks but not its entrypoint: the job
+        process exits as soon as they return, with start() wherever it got to.
+        """
+        self._shutdown.set()
+        if self._started:
+            await self._stopped.wait()
+
+    async def _run(self, ctx: JobContext):
         self.ctx = ctx
         # TODO: disable auto_subscribe. Should be on demand based on the participant's
         # transcription settings
@@ -114,9 +147,23 @@ class BaseSttAgent(EventEmitter, ABC):
         for user_id in list(self.processing_info.keys()):
             self.stop_transcription_for_user(user_id)
 
-        await asyncio.sleep(0.1)
+        # Wait for every pipeline and stream close to finish. Otherwise the job
+        # can exit before the streams are released and before the agent gauge
+        # comes back down.
+        pending = [*self._pipelines, *self._closing]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        # Handlers publish to Redis, which closes once this returns, and Voxtral
+        # emits a final as it unwinds. Bounded so a hung publish cannot hold the job.
+        await self.drain(timeout=TRANSCRIPT_DRAIN_TIMEOUT_S)
 
     def start_transcription_for_user(self, user_id: str, locale: str, provider: str):
+        if self._shutdown.is_set():
+            # A locale message handled during teardown would start a session that
+            # outlives the agent.
+            return
+
         settings = self.participant_settings.setdefault(user_id, {})
         settings["locale"] = locale
         settings["provider"] = provider
@@ -160,7 +207,7 @@ class BaseSttAgent(EventEmitter, ABC):
             )
             raise
 
-        task = asyncio.create_task(
+        task = self._spawn_pipeline(
             self._run_transcription_pipeline(participant, track, stt_stream)
         )
         self.processing_info[participant.identity] = {
@@ -234,9 +281,17 @@ class BaseSttAgent(EventEmitter, ABC):
         # and the stream it was handed is already connected to the provider. Close
         # it here, or it stays open — and billed — for the life of the room job.
         if not info.get("started") and info.get("stream") is not None:
-            asyncio.ensure_future(self._close_stream(info["stream"]))
+            closing = asyncio.ensure_future(self._close_stream(info["stream"]))
+            self._closing.add(closing)
+            closing.add_done_callback(self._closing.discard)
 
         logging.info(f"Stopped transcription for user {user_id}.")
+
+    def _spawn_pipeline(self, pipeline) -> asyncio.Task:
+        task = asyncio.create_task(pipeline)
+        self._pipelines.add(task)
+        task.add_done_callback(self._pipelines.discard)
+        return task
 
     def _release_session_slot(self, user_id: str):
         """Close out a finished pipeline's own session.

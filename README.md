@@ -173,7 +173,7 @@ Caveats worth knowing:
 - **A job killed with `SIGKILL` leaves its gauge value behind.** `prometheus_client`
   drops a dead process's gauge contribution only when `mark_process_dead` is
   called, and `livekit-agents` never calls it. Clean exits, exceptions and
-  cancellations all decrement correctly; an OOM kill does not. The stale value
+  cancellations decrement correctly; an OOM kill does not. The stale value
   clears when the worker restarts. LiveKit's own `lk_agents_active_job_count` is
   affected identically, so `bbb_stt_active_agents` exceeding it indicates leaked
   series.

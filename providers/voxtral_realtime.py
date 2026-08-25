@@ -182,6 +182,10 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
         raise NotImplementedError("VoxtralRealtime uses a custom pipeline")
 
     def start_transcription_for_user(self, user_id: str, locale: str, provider: str):
+        if self._shutdown.is_set():
+            # See BaseSttAgent.start_transcription_for_user.
+            return
+
         settings = self.participant_settings.setdefault(user_id, {})
         settings["locale"] = locale
         settings["provider"] = provider
@@ -214,7 +218,7 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
             return
 
         language = self._sanitize_locale(locale)
-        task = asyncio.create_task(
+        task = self._spawn_pipeline(
             self._run_transcription_pipeline(participant, track, language)
         )
         self.processing_info[participant.identity] = {

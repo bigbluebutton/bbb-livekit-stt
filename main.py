@@ -321,6 +321,30 @@ async def entrypoint(ctx: JobContext):
             )
 
     redis_listen_task = asyncio.create_task(redis_manager.listen(on_redis_message))
+    redis_closing: asyncio.Future | None = None
+
+    async def close_redis():
+        # Every caller awaits the same close: the entrypoint's finally can get
+        # here first, and LiveKit's shutdown callback must still wait for it.
+        nonlocal redis_closing
+        if redis_closing is None:
+            redis_closing = asyncio.ensure_future(_close_redis())
+        await asyncio.shield(redis_closing)
+
+    async def _close_redis():
+        redis_listen_task.cancel()
+        try:
+            await redis_listen_task
+        except asyncio.CancelledError:
+            pass
+        await redis_manager.aclose()
+
+    async def on_job_shutdown():
+        # LiveKit waits for this teardown; see BaseSttAgent.shutdown().
+        await agent.shutdown()
+        await close_redis()
+
+    ctx.add_shutdown_callback(on_job_shutdown)
 
     try:
         if not await redis_manager.connect():
@@ -333,12 +357,7 @@ async def entrypoint(ctx: JobContext):
         logging.info(f"Received job for room {ctx.room.name}")
         await agent.start(ctx)
     finally:
-        redis_listen_task.cancel()
-        try:
-            await redis_listen_task
-        except asyncio.CancelledError:
-            pass
-        await redis_manager.aclose()
+        await close_redis()
 
 
 if __name__ == "__main__":

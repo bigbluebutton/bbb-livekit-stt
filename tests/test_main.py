@@ -8,6 +8,7 @@ from livekit.agents import stt
 
 import main
 from events import EventEmitter
+from redis_manager import RedisManager
 
 
 class StubAgent(EventEmitter):
@@ -27,10 +28,21 @@ class StubAgent(EventEmitter):
         self.room.name = "meeting-1"
         self.running = asyncio.Event()
         self.release = asyncio.Event()
+        self.stopped = asyncio.Event()
 
     async def start(self, ctx):
         self.running.set()
-        await self.release.wait()
+        try:
+            await self.release.wait()
+        finally:
+            self.stopped.set()
+
+    async def shutdown(self):
+        # Like BaseSttAgent: returns once start() has finished, or at once if
+        # it never ran.
+        self.release.set()
+        if self.running.is_set():
+            await self.stopped.wait()
 
 
 def _participant(identity="user_1"):
@@ -184,3 +196,41 @@ class TestTranscriptPublication:
         assert (
             redis.publish_update_transcript_pub_msg.await_args.kwargs["result"] is False
         )
+
+
+class TestJobShutdown:
+    async def test_shutdown_callback_tears_down_the_agent_and_redis(self):
+        """LiveKit awaits a job's shutdown callbacks, not its entrypoint: the
+        callback must finish the teardown by itself."""
+        agent = StubAgent()
+        closed = asyncio.Event()
+
+        async def slow_close(*_):
+            for _ in range(5):
+                await asyncio.sleep(0)
+            closed.set()
+
+        aclose = AsyncMock(side_effect=slow_close)
+        ctx = MagicMock()
+        ctx.room.name = "meeting-1"
+
+        with (
+            patch("main.create_agent", return_value=agent),
+            patch.object(RedisManager, "connect", AsyncMock(return_value=True)),
+            patch.object(RedisManager, "listen", AsyncMock()),
+            patch.object(RedisManager, "aclose", aclose),
+            patch("main.nest_asyncio.apply"),
+            patch("main.get_redacted_app_config", return_value={}),
+        ):
+            task = asyncio.create_task(main.entrypoint(ctx))
+            await asyncio.wait_for(agent.running.wait(), timeout=2)
+
+            (callback,) = ctx.add_shutdown_callback.call_args.args
+            await asyncio.wait_for(callback(), timeout=2)
+
+            assert agent.release.is_set()
+            assert closed.is_set(), "the callback returned before Redis closed"
+            aclose.assert_awaited_once()
+
+            await asyncio.wait_for(task, timeout=2)
+            aclose.assert_awaited_once()

@@ -1168,3 +1168,181 @@ class TestTranscriptEpoch:
 
         assert published == [("bob", 1_000_402.0)]
         await _drain(*tasks)
+
+
+class TestAgentShutdown:
+    """Shutdown must wait for the sessions it tore down, not for a timer."""
+
+    async def test_start_returns_only_after_the_pipelines_have_finished(self):
+        class SlowClosingStream(_BlockingStream):
+            async def aclose(self):
+                # If shutdown waited on a timer, start() would return before this close.
+                await asyncio.sleep(0.3)
+                await super().aclose()
+
+        class SlowAgent(StubSttAgent):
+            def _create_stt_stream(self, locale):
+                return SlowClosingStream()
+
+        registry = CollectorRegistry()
+        agent = SlowAgent(BaseSttConfig(), metrics=SttMetrics(registry))
+        ctx = MagicMock()
+        ctx.connect = AsyncMock()
+        ctx.room.remote_participants = {"p": _with_audio_track(_stub_participant())}
+
+        with patch(
+            "providers.base.rtc.AudioStream",
+            side_effect=lambda *_, **__: _BlockingStream(),
+        ):
+            start = asyncio.create_task(agent.start(ctx))
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            task = agent.processing_info["user_1"]["task"]
+            stt_stream = agent.processing_info["user_1"]["stream"]
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+            agent._on_disconnected()
+            await asyncio.wait_for(start, timeout=3)
+
+        assert task.done()
+        assert stt_stream.closed
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_active_agents", {"provider": agent.provider_name}
+            )
+            == 0.0
+        )
+
+    async def test_a_transcript_emitted_in_teardown_is_handled_first(self):
+        """Voxtral emits a best-effort final when its session is cancelled; the
+        handler publishing it must finish before Redis is closed."""
+        agent, _, ctx = self._slow_agent()
+        handled = asyncio.Event()
+
+        async def on_final(**kwargs):
+            for _ in range(5):
+                await asyncio.sleep(0)
+            handled.set()
+
+        agent.on("final_transcript", on_final)
+
+        start = asyncio.create_task(agent.start(ctx))
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+        async def pipeline_emitting_on_cancel():
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                agent.emit("final_transcript", participant=None, event=None)
+                raise
+
+        task = agent._spawn_pipeline(pipeline_emitting_on_cancel())
+        agent.processing_info["user_1"] = {
+            "task": task,
+            "started": True,
+            "metrics_locale": "pt-BR",
+            "track_sid": "TR_mic",
+        }
+        await asyncio.sleep(0)
+        await asyncio.wait_for(agent.shutdown(), timeout=3)
+
+        assert handled.is_set()
+        await asyncio.wait_for(start, timeout=1)
+
+    async def test_start_after_shutdown_does_not_join_the_room(self):
+        agent, _, ctx = self._slow_agent()
+
+        await asyncio.wait_for(agent.shutdown(), timeout=1)
+        await asyncio.wait_for(agent.start(ctx), timeout=1)
+
+        ctx.connect.assert_not_called()
+
+    @staticmethod
+    def _slow_agent():
+        class SlowClosingStream(_BlockingStream):
+            async def aclose(self):
+                await asyncio.sleep(0.3)
+                await super().aclose()
+
+        class SlowAgent(StubSttAgent):
+            def _create_stt_stream(self, locale):
+                return SlowClosingStream()
+
+        registry = CollectorRegistry()
+        agent = SlowAgent(BaseSttConfig(), metrics=SttMetrics(registry))
+        ctx = MagicMock()
+        ctx.connect = AsyncMock()
+        ctx.room.remote_participants = {"p": _with_audio_track(_stub_participant())}
+        return agent, registry, ctx
+
+    async def _running_session(self, agent, ctx):
+        start = asyncio.create_task(agent.start(ctx))
+        for _ in range(3):
+            await asyncio.sleep(0)
+        agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+        info = agent.processing_info["user_1"]
+        for _ in range(3):
+            await asyncio.sleep(0)
+        return start, info["task"], info["stream"]
+
+    async def test_shutdown_returns_only_after_the_teardown(self):
+        """LiveKit awaits a job's shutdown callbacks, not its entrypoint, so
+        shutdown() itself must cover the whole teardown."""
+        agent, registry, ctx = self._slow_agent()
+
+        with patch(
+            "providers.base.rtc.AudioStream",
+            side_effect=lambda *_, **__: _BlockingStream(),
+        ):
+            start, task, stt_stream = await self._running_session(agent, ctx)
+            await asyncio.wait_for(agent.shutdown(), timeout=3)
+
+            assert task.done()
+            assert stt_stream.closed
+            assert (
+                registry.get_sample_value(
+                    "bbb_stt_active_agents", {"provider": agent.provider_name}
+                )
+                == 0.0
+            )
+            await asyncio.wait_for(start, timeout=1)
+
+    async def test_shutdown_of_an_agent_never_started_returns(self):
+        agent, _, _ = self._slow_agent()
+        await asyncio.wait_for(agent.shutdown(), timeout=1)
+
+    async def test_teardown_waits_for_a_session_stopped_just_before(self):
+        """A participant leaving just before the room closes takes the session
+        out of processing_info; its pipeline is still unwinding."""
+        agent, _, ctx = self._slow_agent()
+
+        with patch(
+            "providers.base.rtc.AudioStream",
+            side_effect=lambda *_, **__: _BlockingStream(),
+        ):
+            start, task, stt_stream = await self._running_session(agent, ctx)
+            agent.stop_transcription_for_user("user_1")
+            await asyncio.wait_for(agent.shutdown(), timeout=3)
+
+            assert task.done()
+            assert stt_stream.closed
+            await asyncio.wait_for(start, timeout=1)
+
+    async def test_no_session_starts_once_shutdown_begins(self):
+        agent, registry, ctx = self._slow_agent()
+        agent.room = ctx.room
+        agent._shutdown.set()
+
+        agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+
+        assert "user_1" not in agent.processing_info
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_session_starts_total", {"provider": agent.provider_name}
+            )
+            is None
+        )
