@@ -30,6 +30,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 * docs: correct how the OpenAI provider reaches the API and list its caveats
 * docs: expand and correct AGENTS.md
 * docs: document Prometheus metrics and their operational caveats
+* docs: document the transcription session lifecycle contracts
 
 ## v0.3.0
 

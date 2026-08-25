@@ -147,6 +147,7 @@ load, child process count).
 | `bbb_stt_session_starts_total` | Counter | `provider` | Sessions successfully started |
 | `bbb_stt_session_start_failures_total` | Counter | `provider`, `reason` | Sessions that could not be established |
 | `bbb_stt_agent_start_failures_total` | Counter | `provider`, `reason` | Agents that could not be established |
+| `bbb_stt_locale_update_failures_total` | Counter | `provider` | Locale changes an active session's provider stream did not accept |
 | `bbb_stt_transcripts_total` | Counter | `provider`, `event_type` | Transcripts that passed filtering and were sent to BBB |
 | `bbb_stt_transcripts_discarded_total` | Counter | `provider`, `reason` | Transcripts dropped before publication |
 | `bbb_stt_transcript_confidence` | Histogram | `provider`, `event_type` | Confidence of published transcripts (Gladia only) |
@@ -174,6 +175,10 @@ Caveats worth knowing:
   clears when the worker restarts. LiveKit's own `lk_agents_active_job_count` is
   affected identically, so `bbb_stt_active_agents` exceeding it indicates leaked
   series.
+- **A rejected locale change leaves the session transcribing in its previous
+  locale.** `bbb_stt_locale_update_failures_total` counts those; the participant's
+  next request for the same locale is retried rather than skipped, so a brief
+  provider hiccup resolves itself and a persistent one shows up as a rising rate.
 - `bbb_stt_transcript_confidence` is only populated for Gladia as of now. Providers
   that do not report transcript confidence (e.g.: OpenAI) do not populate this histogram.
 

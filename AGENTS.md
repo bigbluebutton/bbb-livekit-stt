@@ -69,7 +69,9 @@ dependencies, run the agent, and run tests.
    pipeline (Gladia via `_create_stt_stream()`; OpenAI via its own override).
 3. The provider emits transcript events → `_should_emit()` filters them (e.g. Gladia
    confidence thresholds) → the agent emits the survivors.
-4. `main.py` adjusts timestamps with `open_time` and calls `resolve_bbb_locale()` to
+4. `main.py` adjusts timestamps with `open_time` — the wall clock at which that
+   participant's provider stream opened, emitted with every transcript because
+   providers report offsets within their own stream — and calls `resolve_bbb_locale()` to
    map the transcript back to a BBB locale.
 5. `RedisManager` publishes `UpdateTranscriptPubMsg` back to BBB.
 
@@ -86,12 +88,28 @@ callers must then discard the transcript rather than publish a null locale.
 `translation_lang_map` lives in `providers/gladia.py` and is empty for providers
 without translation support.
 
+Transcription is enabled only when `UserSpeechLocaleChangedEvtMsg` carries **both** a
+`locale` and a `provider`. The html5 client clears both when a user unassigns their
+language; other producers (a plugin pausing transcription) clear only the locale and
+leave `provider` filled, and akka-bbb-apps forwards either verbatim.
+`handle_speech_locale_change()` reads any incomplete pair as "disable" and routes it to
+`disable_transcription_for_user()`, which stops the session *and* drops the stored
+locale/provider. Clearing them is load-bearing: `participant_settings` is what
+`_on_track_subscribed()` restarts from,
+so a locale left behind resurrects transcription the user turned off and makes
+re-enabling the same locale a silent no-op. The dispatch decides "is a session
+running" from `processing_info`, never from the stored locale.
+
 ### Adding a new provider
 
 1. Create `providers/<name>.py` with a config dataclass extending `BaseSttConfig`
    and an agent class extending `BaseSttAgent`.
 2. Implement `_create_stt_stream()` and `_update_stream_locale()`; optionally
-   override `_should_emit()` and `translation_lang_map`.
+   override `_should_emit()` and `translation_lang_map`. The stream returned by
+   `_create_stt_stream()` must accept `end_input()` and `aclose()` — the pipeline
+   ends its input when the audio runs out and closes it on the way out.
+   `_update_stream_locale()` may raise: the caller keeps the participant on the
+   locale they had and counts the failure, so a later retry has to work.
 3. **Handle a `None` locale** in both — it is how `"auto"` reaches a provider.
    Omitting the language is what enables server-side detection.
 4. Register it in the factory in `providers/__init__.py`.
@@ -167,9 +185,19 @@ until they pass. Do not add tests for input shapes the callers cannot produce.
 - **Metrics tests need a fresh registry.** Construct `SttMetrics(CollectorRegistry())`
   per test and read values with `registry.get_sample_value(name, labels)`. Reusing
   the default registry makes tests order-dependent.
-- **`processing_info` entries require `metrics_locale`.** `stop_transcription_for_user`
-  reads it to decrement the right gauge label. Tests that hand-build entries must
-  include it.
+- **`processing_info` entries require `metrics_locale` and `track_sid`.**
+  `stop_transcription_for_user` and `_release_session_slot` read the first to
+  decrement the right gauge label; `_on_track_unsubscribed` reads the second to tell
+  the session's own microphone from the participant's other audio tracks. Tests that
+  hand-build entries must include whichever the path under test reads.
+- **A pipeline only closes out a `processing_info` entry it still owns.** The task
+  compares `info["task"]` against `asyncio.current_task()` before deleting, because a
+  session restarted in the same event-loop turn (disable→enable, or OpenAI's
+  restart-on-locale-change) already holds the slot by the time the cancelled task
+  unwinds. That check is also what makes the session gauge balance: a pipeline that
+  ended by itself returns it there, and the stop path returns it before cancelling.
+  Tests that hand-build an entry and then `await` the pipeline directly must set
+  `"task": asyncio.current_task()`, or the cleanup will not fire.
 - **Test patch targets**: patch at the import location — `"providers.gladia.GladiaSTT"`,
   not `"livekit.plugins.gladia.STT"`; `"providers.base.rtc.AudioStream"` for the
   shared audio pipeline, `"providers.openai.rtc.AudioStream"` for OpenAI's own.
