@@ -63,6 +63,7 @@ def _make_participant(identity, has_audio_track=True):
         mock_track.kind = rtc.TrackKind.KIND_AUDIO
         pub = MagicMock()
         pub.track = mock_track
+        pub.source = rtc.TrackSource.SOURCE_MICROPHONE
         pubs["audio"] = pub
     participant.track_publications = pubs
     return participant
@@ -2014,3 +2015,25 @@ class TestSessionGaugeOnSelfEnd:
         assert task.exception() is None
         assert "user_1" not in agent.processing_info
         assert self._gauge(registry) == 0.0
+
+
+class TestTrackScoping:
+    async def test_only_the_sessions_own_track_ends_it(self):
+        """_on_track_unsubscribed matches the session's track_sid: another
+        audio track going away leaves the session running."""
+        participant = _make_participant("user_1")
+        mic = participant.track_publications["audio"].track
+        mic.sid = "TR_mic"
+        agent = _make_agent_with_room(participants={"p1": participant})
+        other = MagicMock()
+        other.sid = "TR_screenshare"
+
+        with patch.object(agent, "_run_transcription_pipeline", new=AsyncMock()):
+            agent.start_transcription_for_user("user_1", "en-US", "voxtral-realtime")
+            agent._on_track_unsubscribed(other, MagicMock(), participant)
+            assert "user_1" in agent.processing_info
+
+            agent._on_track_unsubscribed(mic, MagicMock(), participant)
+            await asyncio.sleep(0)
+
+        assert "user_1" not in agent.processing_info

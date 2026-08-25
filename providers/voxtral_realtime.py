@@ -231,8 +231,8 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
         )
         self.processing_info[participant.identity] = {
             "task": task,
-            # See BaseSttAgent.start_transcription_for_user for why this is kept
-            # separate from participant_settings.
+            "track_sid": track.sid,
+            # See BaseSttAgent.start_transcription_for_user.
             "metrics_locale": locale,
         }
         self.metrics.session_started(self.provider_name, locale)

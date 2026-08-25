@@ -44,6 +44,7 @@ def _make_participant(identity, audio_track=None):
     pubs = {}
     if audio_track:
         pub = MagicMock()
+        pub.source = rtc.TrackSource.SOURCE_MICROPHONE
         pub.track = audio_track
         pub.track.kind = rtc.TrackKind.KIND_AUDIO
         pubs["audio"] = pub

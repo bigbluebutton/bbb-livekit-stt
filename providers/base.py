@@ -172,6 +172,7 @@ class BaseSttAgent(EventEmitter, ABC):
         self.processing_info[participant.identity] = {
             "stream": stt_stream,
             "task": task,
+            "track_sid": track.sid,
             # The locale the gauge was incremented under. Kept apart from
             # participant_settings: a later change there must not move the
             # decrement to another label and leave this one stuck above zero.
@@ -299,6 +300,14 @@ class BaseSttAgent(EventEmitter, ABC):
         publication: rtc.TrackPublication,
         participant: rtc.RemoteParticipant,
     ):
+        info = self.processing_info.get(participant.identity)
+
+        # AUDIO_ONLY subscribes screenshare audio too. Ending the session on any
+        # other track would stop a live microphone's transcription, and nothing
+        # would restart it.
+        if info is None or info["track_sid"] != track.sid:
+            return
+
         self.stop_transcription_for_user(participant.identity)
 
     def _on_participant_disconnected(self, participant: rtc.RemoteParticipant, *_):
@@ -319,8 +328,14 @@ class BaseSttAgent(EventEmitter, ABC):
         return None
 
     def _find_audio_track(self, participant: rtc.RemoteParticipant) -> rtc.Track | None:
+        # Skip screenshare audio: only the microphone carries the participant's
+        # speech. _on_track_subscribed filters on the same source.
         for pub in participant.track_publications.values():
-            if pub.track and pub.track.kind == rtc.TrackKind.KIND_AUDIO:
+            if (
+                pub.track
+                and pub.track.kind == rtc.TrackKind.KIND_AUDIO
+                and pub.source == rtc.TrackSource.SOURCE_MICROPHONE
+            ):
                 return pub.track
         return None
 
