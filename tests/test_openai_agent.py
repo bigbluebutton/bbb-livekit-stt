@@ -375,6 +375,104 @@ class TestSessionSlotOwnership:
             await asyncio.gather(first, second, return_exceptions=True)
 
 
+class TestOpenAiSessionAccounting:
+    async def test_gauge_returns_to_zero_when_the_pipeline_raises(self):
+        """When the REST pipeline fails on its own, no stop call runs, so the
+        pipeline must return the session gauge itself."""
+
+        class DyingStream:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                await asyncio.sleep(0)
+                raise RuntimeError("transcription backend unreachable")
+
+            async def aclose(self):
+                pass
+
+        registry = CollectorRegistry()
+        config = OpenAiConfig(api_key="fake-key")
+        agent = OpenAiSttAgent(config, metrics=SttMetrics(registry))
+        agent.room = MagicMock()
+        agent.room.remote_participants = {"p": _openai_participant(with_track=True)}
+
+        with patch("providers.openai.rtc.AudioStream", return_value=DyingStream()):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "openai")
+            task = agent.processing_info["user_1"]["task"]
+            await asyncio.gather(task, return_exceptions=True)
+
+        assert "user_1" not in agent.processing_info
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_active_sessions", {"provider": "openai", "locale": "pt-BR"}
+            )
+            == 0.0
+        )
+
+    async def test_an_unopenable_audio_stream_leaves_no_session_behind(self):
+        """The REST pipeline opens its own audio stream. A failure there must
+        leave the gauge at zero and must not block a retry."""
+        registry = CollectorRegistry()
+        agent = OpenAiSttAgent(
+            OpenAiConfig(api_key="fake-key"), metrics=SttMetrics(registry)
+        )
+        agent.room = MagicMock()
+        agent.room.remote_participants = {"p": _openai_participant(with_track=True)}
+
+        with patch(
+            "providers.openai.rtc.AudioStream",
+            side_effect=RuntimeError("no such track"),
+        ):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "openai")
+            task = agent.processing_info["user_1"]["task"]
+            await asyncio.gather(task, return_exceptions=True)
+
+            assert "user_1" not in agent.processing_info
+            assert (
+                registry.get_sample_value(
+                    "bbb_stt_active_sessions",
+                    {"provider": "openai", "locale": "pt-BR"},
+                )
+                == 0.0
+            )
+
+        with patch(
+            "providers.openai.rtc.AudioStream",
+            side_effect=lambda *_, **__: _BlockingStream(),
+        ):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "openai")
+            assert "user_1" in agent.processing_info
+
+            retry = agent.processing_info["user_1"]["task"]
+            retry.cancel()
+            await asyncio.gather(retry, return_exceptions=True)
+
+    async def test_unsubscribing_another_track_leaves_the_session_running(self):
+        """The REST pipeline records its track like the streaming one does."""
+        participant = _openai_participant(with_track=True)
+        screenshare = MagicMock()
+        screenshare.kind = rtc.TrackKind.KIND_AUDIO
+        screenshare.sid = "TR_screen"
+        screen_pub = MagicMock()
+        screen_pub.source = rtc.TrackSource.SOURCE_SCREENSHARE_AUDIO
+        screen_pub.track = screenshare
+        participant.track_publications["screen"] = screen_pub
+
+        agent = _make_agent_with_room(participants={"p": participant})
+
+        with patch("providers.openai.rtc.AudioStream", return_value=_BlockingStream()):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "openai")
+            task = agent.processing_info["user_1"]["task"]
+
+            agent._on_track_unsubscribed(screenshare, screen_pub, participant)
+
+            assert "user_1" in agent.processing_info
+
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
 class TestCleanup:
     async def test_closes_http_session_on_cleanup(self):
         """_cleanup() should close the aiohttp session."""
