@@ -270,5 +270,4 @@ class OpenAiSttAgent(BaseSttAgent):
             logging.error(f"Error during transcription for track {track.sid}: {e}")
         finally:
             self._release_session_slot(participant.identity)
-            if audio_stream is not None:
-                await audio_stream.aclose()
+            await self._close_stream(audio_stream)

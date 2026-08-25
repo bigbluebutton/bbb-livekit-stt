@@ -345,6 +345,22 @@ class BaseSttAgent(EventEmitter, ABC):
                 return pub.track
         return None
 
+    async def _close_stream(self, stream) -> None:
+        """Release a stream the pipeline opened.
+
+        Ending the task is not enough: the provider stream owns a websocket and
+        the audio stream a native handle, and neither goes away with the
+        coroutine. Nothing can be done about a close that fails — the session is
+        over either way — so it must not take the rest of the teardown with it.
+        """
+        if stream is None:
+            return
+
+        try:
+            await stream.aclose()
+        except Exception as e:
+            logging.debug(f"Error closing {type(stream).__name__}: {e}")
+
     def _sanitize_locale(self, locale: str) -> str | None:
         # STT providers typically accept ISO 639-1 locales (e.g. "en")
         # BBB uses <ISO 639-1>-<ISO 3166-1> format (e.g. "en-US")
@@ -371,7 +387,10 @@ class BaseSttAgent(EventEmitter, ABC):
                 async for audio_event in audio_stream:
                     stt_stream.push_frame(audio_event.frame)
             finally:
-                stt_stream.flush()
+                # Ends the input rather than just flushing it: a recognizer that
+                # is never told the audio is over keeps the pipeline waiting for
+                # transcripts that cannot arrive.
+                stt_stream.end_input()
 
         async def process_stt_task():
             async for event in stt_stream:
@@ -413,3 +432,5 @@ class BaseSttAgent(EventEmitter, ABC):
             logging.error(f"Error during transcription for track {track.sid}: {e}")
         finally:
             self._release_session_slot(participant.identity)
+            await self._close_stream(audio_stream)
+            await self._close_stream(stt_stream)
