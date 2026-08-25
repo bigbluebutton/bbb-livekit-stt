@@ -368,8 +368,10 @@ class TestRunTranscriptionPipeline:
 
         agent.processing_info["user_1"] = {
             "stream": mock_stt_stream,
-            # The pipeline only clears an entry it still owns.
+            # The pipeline only clears an entry it still owns, and returns its
+            # gauge under the locale it was counted as.
             "task": asyncio.current_task(),
+            "metrics_locale": "en-US",
         }
 
         with patch("providers.base.rtc.AudioStream", return_value=mock_audio_stream):
@@ -476,8 +478,10 @@ class TestRunTranscriptionPipeline:
 
         agent.processing_info["user_1"] = {
             "stream": mock_stt_stream,
-            # The pipeline only clears an entry it still owns.
+            # The pipeline only clears an entry it still owns, and returns its
+            # gauge under the locale it was counted as.
             "task": asyncio.current_task(),
+            "metrics_locale": "en-US",
         }
 
         with patch("providers.base.rtc.AudioStream", return_value=mock_audio_stream):

@@ -19,6 +19,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 * fix: report Redis connect and publish failures to callers
 * fix: restart transcription when a speech locale is reassigned
 * fix: keep a restarted transcription session's processing_info entry
+* fix: return the session gauge when a transcription pipeline ends on its own
 * build(docker): add LOG_LEVEL env var to control the container's log level
 * build: declare aiohttp and numpy as direct dependencies
 * docs: correct how the OpenAI provider reaches the API and list its caveats

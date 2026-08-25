@@ -177,7 +177,7 @@ class OpenAiSttAgent(BaseSttAgent):
         openai plugin's stream() directly.  This would unlock lower latency for
         backends that implement the OpenAI Realtime API.
         """
-        audio_stream = rtc.AudioStream(track)
+        audio_stream = None
         open_time = time.time()
         self.open_time = open_time
 
@@ -220,6 +220,8 @@ class OpenAiSttAgent(BaseSttAgent):
                 )
 
         try:
+            audio_stream = rtc.AudioStream(track)
+
             async for audio_event in audio_stream:
                 frame = audio_event.frame
                 samples = np.frombuffer(frame.data, dtype=np.int16)
@@ -267,4 +269,5 @@ class OpenAiSttAgent(BaseSttAgent):
             logging.error(f"Error during transcription for track {track.sid}: {e}")
         finally:
             self._release_session_slot(participant.identity)
-            await audio_stream.aclose()
+            if audio_stream is not None:
+                await audio_stream.aclose()
