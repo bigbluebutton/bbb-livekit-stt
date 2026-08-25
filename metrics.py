@@ -32,7 +32,6 @@ AGENT_FAILURE_REDIS_CONNECT = "redis_connect_error"
 DISCARD_LOW_CONFIDENCE = "low_confidence"
 DISCARD_UNRESOLVABLE_LOCALE = "unresolvable_locale"
 DISCARD_BELOW_MIN_UTTERANCE_LENGTH = "below_min_utterance_length"
-DISCARD_MISSING_LOCALE = "missing_locale"
 
 # prometheus_client's default buckets are latency-oriented and useless for a
 # [0, 1] score.
