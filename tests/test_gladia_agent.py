@@ -347,6 +347,7 @@ class TestRunTranscriptionPipeline:
         mock_audio_stream.__aiter__.side_effect = asyncio.CancelledError
 
         mock_stt_stream = AsyncMock()
+        mock_stt_stream.end_input = MagicMock()
         mock_stt_stream.__aiter__.return_value = iter([])
 
         agent.processing_info["user_1"] = {
@@ -378,6 +379,7 @@ class TestRunTranscriptionPipeline:
         mock_event = MagicMock()
         mock_event.type = stt.SpeechEventType.FINAL_TRANSCRIPT
         mock_stt_stream = AsyncMock()
+        mock_stt_stream.end_input = MagicMock()
         mock_stt_stream.__aiter__.return_value = iter([mock_event])
 
         emitted = []
@@ -406,6 +408,7 @@ class TestRunTranscriptionPipeline:
         mock_event = MagicMock()
         mock_event.type = stt.SpeechEventType.INTERIM_TRANSCRIPT
         mock_stt_stream = AsyncMock()
+        mock_stt_stream.end_input = MagicMock()
         mock_stt_stream.__aiter__.return_value = iter([mock_event])
 
         emitted = []
@@ -432,6 +435,7 @@ class TestRunTranscriptionPipeline:
         mock_event = MagicMock()
         mock_event.type = stt.SpeechEventType.INTERIM_TRANSCRIPT
         mock_stt_stream = AsyncMock()
+        mock_stt_stream.end_input = MagicMock()
         mock_stt_stream.__aiter__.return_value = iter([mock_event])
 
         emitted = []
@@ -456,6 +460,7 @@ class TestRunTranscriptionPipeline:
         mock_audio_stream.__aiter__.side_effect = RuntimeError("boom")
 
         mock_stt_stream = AsyncMock()
+        mock_stt_stream.end_input = MagicMock()
         mock_stt_stream.__aiter__.return_value = iter([])
 
         agent.processing_info["user_1"] = {

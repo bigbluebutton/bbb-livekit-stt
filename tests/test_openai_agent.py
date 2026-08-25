@@ -472,6 +472,25 @@ class TestOpenAiSessionAccounting:
             retry.cancel()
             await asyncio.gather(retry, return_exceptions=True)
 
+    async def test_closes_its_audio_stream_when_the_session_stops(self):
+        """The REST pipeline opens its own audio stream and is the only thing
+        that can release it."""
+        participant = _openai_participant(with_track=True)
+        agent = _make_agent_with_room(participants={"p": participant})
+        audio_stream = _BlockingStream()
+
+        with patch("providers.openai.rtc.AudioStream", return_value=audio_stream):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "openai")
+            task = agent.processing_info["user_1"]["task"]
+
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+            agent.handle_speech_locale_change("user_1", "", "")
+            await asyncio.gather(task, return_exceptions=True)
+
+        assert audio_stream.closed
+
     async def test_unsubscribing_another_track_leaves_the_session_running(self):
         """The REST pipeline records its track like the streaming one does."""
         participant = _openai_participant(with_track=True)
