@@ -174,6 +174,9 @@ class BaseSttAgent(EventEmitter, ABC):
         self.processing_info[participant.identity] = {
             "stream": stt_stream,
             "task": task,
+            # The track this session transcribes. A participant can have several
+            # audio tracks, and only this one's departure ends the session.
+            "track_sid": track.sid,
             # The locale the gauge was incremented under. Kept separate from
             # participant_settings so a later mutation cannot make the decrement
             # land on a different label and strand a phantom session.
@@ -302,6 +305,15 @@ class BaseSttAgent(EventEmitter, ABC):
         publication: rtc.TrackPublication,
         participant: rtc.RemoteParticipant,
     ):
+        info = self.processing_info.get(participant.identity)
+
+        # The room is joined with AUDIO_ONLY, so screenshare audio is subscribed
+        # as well: ending the session on any track but its own kills
+        # transcription for a participant whose microphone is still published,
+        # and nothing would start it again.
+        if info is None or info["track_sid"] != track.sid:
+            return
+
         self.stop_transcription_for_user(participant.identity)
 
     def _on_participant_disconnected(self, participant: rtc.RemoteParticipant, *_):
@@ -321,8 +333,15 @@ class BaseSttAgent(EventEmitter, ABC):
         return None
 
     def _find_audio_track(self, participant: rtc.RemoteParticipant) -> rtc.Track | None:
+        # Screenshare audio is an audio track too, and it is subscribed like any
+        # other; transcribing it instead of the speaker is not a caption anyone
+        # asked for. _on_track_subscribed filters on the same source.
         for pub in participant.track_publications.values():
-            if pub.track and pub.track.kind == rtc.TrackKind.KIND_AUDIO:
+            if (
+                pub.track
+                and pub.track.kind == rtc.TrackKind.KIND_AUDIO
+                and pub.source == rtc.TrackSource.SOURCE_MICROPHONE
+            ):
                 return pub.track
         return None
 

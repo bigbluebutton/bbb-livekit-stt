@@ -139,8 +139,9 @@ class OpenAiSttAgent(BaseSttAgent):
         )
         self.processing_info[participant.identity] = {
             "task": task,
-            # See BaseSttAgent.start_transcription_for_user for why this is kept
+            # See BaseSttAgent.start_transcription_for_user for why these are kept
             # separate from participant_settings.
+            "track_sid": track.sid,
             "metrics_locale": locale,
         }
         self.metrics.session_started(self.provider_name, locale)

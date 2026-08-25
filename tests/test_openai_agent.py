@@ -59,6 +59,7 @@ def _make_participant(identity, audio_track=None):
     pubs = {}
     if audio_track:
         pub = MagicMock()
+        pub.source = rtc.TrackSource.SOURCE_MICROPHONE
         pub.track = audio_track
         pub.track.kind = rtc.TrackKind.KIND_AUDIO
         pubs["audio"] = pub
@@ -485,6 +486,7 @@ def _openai_participant(identity="user_1", with_track=False):
         track = MagicMock()
         track.kind = rtc.TrackKind.KIND_AUDIO
         publication = MagicMock()
+        publication.source = rtc.TrackSource.SOURCE_MICROPHONE
         publication.track = track
         pubs["t"] = publication
     participant.track_publications = pubs

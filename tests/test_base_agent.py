@@ -121,12 +121,18 @@ def _stub_participant(identity="user_1"):
     return participant
 
 
-def _with_audio_track(participant):
+def _audio_publication(source=rtc.TrackSource.SOURCE_MICROPHONE, sid="TR_mic"):
     track = MagicMock()
     track.kind = rtc.TrackKind.KIND_AUDIO
+    track.sid = sid
     publication = MagicMock()
+    publication.source = source
     publication.track = track
-    participant.track_publications = {"t": publication}
+    return publication
+
+
+def _with_audio_track(participant):
+    participant.track_publications = {"t": _audio_publication()}
     return participant
 
 
@@ -538,7 +544,8 @@ class TestSpeechLocaleChangeDispatch:
             agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
             first = agent.processing_info["user_1"]["task"]
 
-            agent._on_track_unsubscribed(MagicMock(), MagicMock(), participant)
+            mic = participant.track_publications["t"]
+            agent._on_track_unsubscribed(mic.track, mic, participant)
             assert "user_1" not in agent.processing_info
 
             agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
