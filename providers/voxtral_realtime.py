@@ -262,7 +262,6 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
             else {}
         )
         open_time = time.time()
-        self.open_time = open_time
         retry_delay = _RETRY_DELAY_INITIAL_S
         # Monotonic timestamp of the first handshake failure in the current
         # streak; cleared whenever a handshake succeeds, so a long meeting with
