@@ -461,10 +461,11 @@ class BaseSttAgent(EventEmitter, ABC):
                 async for audio_event in audio_stream:
                     stt_stream.push_frame(audio_event.frame)
             finally:
-                # Ends the input rather than just flushing it: a recognizer that
-                # is never told the audio is over keeps the pipeline waiting for
-                # transcripts that cannot arrive.
-                stt_stream.end_input()
+                # Ends the input, not just flushes it: a recognizer never told
+                # the audio is over keeps the pipeline waiting. Skipped once the
+                # provider side has ended, since the closed stream raises.
+                if process is None or not process.done():
+                    stt_stream.end_input()
 
         async def process_stt_task():
             async for event in stt_stream:
@@ -495,14 +496,47 @@ class BaseSttAgent(EventEmitter, ABC):
                             event.recognition_usage.audio_duration,
                         )
 
+        forward: asyncio.Task | None = None
+        process: asyncio.Task | None = None
+
         try:
             audio_stream = rtc.AudioStream(track)
-            await asyncio.gather(forward_audio_task(), process_stt_task())
+            forward = asyncio.create_task(forward_audio_task())
+            process = asyncio.create_task(process_stt_task())
+
+            done, _ = await asyncio.wait(
+                {forward, process}, return_when=asyncio.FIRST_COMPLETED
+            )
+
+            # A provider can close its side on its own, e.g. on an idle timeout
+            # while the participant is muted. Then stop forwarding: that leg can
+            # wait on a silent microphone forever. When the audio ends first, keep
+            # reading: the provider still owes the last transcripts.
+            if process in done:
+                forward.cancel()
+
+            # The provider leg first: when both fail, its error is the cause.
+            for result in await asyncio.gather(
+                process, forward, return_exceptions=True
+            ):
+                if isinstance(result, BaseException) and not isinstance(
+                    result, asyncio.CancelledError
+                ):
+                    raise result
         except asyncio.CancelledError:
             logging.info(f"Transcription for {participant.identity} was cancelled.")
         except Exception as e:
             logging.error(f"Error during transcription for track {track.sid}: {e}")
         finally:
+            # Before the first await: a stop that arrives while the legs unwind
+            # would otherwise cancel this teardown and leave both streams open.
             self._release_session_slot(participant.identity)
+
+            legs = [leg for leg in (forward, process) if leg is not None]
+            for leg in legs:
+                leg.cancel()
+            if legs:
+                await asyncio.gather(*legs, return_exceptions=True)
+
             await self._close_stream(audio_stream)
             await self._close_stream(stt_stream)

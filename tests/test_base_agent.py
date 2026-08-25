@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -753,6 +754,41 @@ class _EndingStream:
         raise StopAsyncIteration
 
 
+class _ProviderEndsStream:
+    """Provider stream that ends on its side, cleanly or with an error.
+
+    Like livekit's RecognizeStream, it is closed once its side has ended, and
+    end_input() on a closed stream raises.
+    """
+
+    def __init__(self, error=None):
+        self.error = error
+        self.closed = False
+        self.ended = asyncio.Event()
+        self._provider_done = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await self.ended.wait()
+        self._provider_done = True
+        if self.error is not None:
+            raise self.error
+        raise StopAsyncIteration
+
+    def push_frame(self, frame):
+        pass
+
+    def end_input(self):
+        if self._provider_done:
+            raise RuntimeError(f"{type(self).__name__} is closed")
+
+    async def aclose(self):
+        self.closed = True
+        self.ended.set()
+
+
 class TestSessionAccountingWhenAPipelineDies:
     """A pipeline that ends on its own must decrement its own session gauge.
     No stop call does it, so its label would stay for the process's life."""
@@ -1017,6 +1053,77 @@ class TestStreamTeardown:
             )
             == 0.0
         )
+
+    def _provider_ending_agent(self, stream):
+        class Agent(StubSttAgent):
+            def _create_stt_stream(self, locale):
+                return stream
+
+        agent = Agent(BaseSttConfig(), metrics=SttMetrics(CollectorRegistry()))
+        agent.room = MagicMock()
+        agent.room.remote_participants = {"p": _with_audio_track(_stub_participant())}
+        return agent
+
+    async def _provider_ends(self, stream):
+        agent = self._provider_ending_agent(stream)
+        with patch(
+            "providers.base.rtc.AudioStream",
+            side_effect=lambda *_, **__: _BlockingStream(),
+        ):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            task = agent.processing_info["user_1"]["task"]
+            for _ in range(3):
+                await asyncio.sleep(0)
+            stream.ended.set()
+            await asyncio.wait_for(asyncio.shield(task), timeout=2)
+
+    async def test_a_provider_error_is_logged_as_itself(self, caplog):
+        await self._provider_ends(
+            _ProviderEndsStream(ValueError("PROVIDER ERROR: 400 bad language"))
+        )
+
+        errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+        assert any("PROVIDER ERROR: 400" in m for m in errors), errors
+        assert not any("is closed" in m for m in errors), errors
+
+    async def test_a_clean_provider_close_logs_no_error(self, caplog):
+        await self._provider_ends(_ProviderEndsStream())
+
+        assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+    async def test_a_stop_during_a_self_ended_teardown_still_closes_both(self):
+        """A pipeline whose provider ended suspends while its legs unwind. A
+        stop landing then must not abort the closes."""
+        stt_stream = _ProviderEndsStream(RuntimeError("provider failed"))
+        audio_stream = _BlockingStream()
+        agent = self._provider_ending_agent(stt_stream)
+        source = inspect.getsourcelines(BaseSttAgent._run_transcription_pipeline)
+        legs_line = next(
+            n
+            for n, line in enumerate(source[0], start=source[1])
+            if "await asyncio.gather(*legs" in line
+        )
+
+        with patch("providers.base.rtc.AudioStream", return_value=audio_stream):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            task = agent.processing_info["user_1"]["task"]
+            for _ in range(3):
+                await asyncio.sleep(0)
+            stt_stream.ended.set()
+
+            for _ in range(50):
+                await asyncio.sleep(0)
+                frames = task.get_stack()
+                if frames and frames[-1].f_lineno == legs_line:
+                    break
+            else:
+                pytest.fail("the pipeline never reached its teardown")
+
+            agent.handle_speech_locale_change("user_1", "", "")
+            await asyncio.gather(task, return_exceptions=True)
+
+        assert stt_stream.closed
+        assert audio_stream.closed
 
 
 class _ScriptedSttStream:
