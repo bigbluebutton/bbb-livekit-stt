@@ -26,6 +26,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 * fix: stamp each transcript with its own session's start time
 * build(docker): add LOG_LEVEL env var to control the container's log level
 * build: declare aiohttp and numpy as direct dependencies
+* build: count main.py in coverage
 * docs: correct how the OpenAI provider reaches the API and list its caveats
 * docs: expand and correct AGENTS.md
 * docs: document Prometheus metrics and their operational caveats
