@@ -23,11 +23,6 @@ class StubSttAgent(BaseSttAgent):
     def _create_stt_stream(self, locale):
         return MagicMock()
 
-    def _update_stream_locale(self, user_id, locale):
-        stream = self.processing_info[user_id]["stream"]
-        sanitized = self._sanitize_locale(locale)
-        stream.update_options(languages=[sanitized])
-
 
 def _make_stub_agent(interim_results=None):
     config = BaseSttConfig(interim_results=interim_results)
@@ -519,21 +514,39 @@ class TestSpeechLocaleChangeDispatch:
         assert agent.participant_settings["user_1"]["locale"] == "en-US"
         await _drain(first, second)
 
-    async def test_changing_locale_while_running_updates_in_place(self):
-        agent, _, _ = _agent_with_participant()
+    async def test_changing_locale_while_running_restarts_the_session(self):
+        agent, registry, _ = _agent_with_participant()
 
-        with patch("providers.base.rtc.AudioStream"):
+        with patch(
+            "providers.base.rtc.AudioStream",
+            side_effect=lambda *_, **__: _BlockingStream(),
+        ):
             agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
-            task = agent.processing_info["user_1"]["task"]
-            stream = agent.processing_info["user_1"]["stream"]
+            first = agent.processing_info["user_1"]["task"]
+
+            for _ in range(3):
+                await asyncio.sleep(0)
 
             agent.handle_speech_locale_change("user_1", "en-US", "gladia")
+            second = agent.processing_info["user_1"]["task"]
 
-            assert agent.processing_info["user_1"]["task"] is task
-            stream.update_options.assert_called_once_with(languages=["en"])
-
-        assert agent.participant_settings["user_1"]["locale"] == "en-US"
-        await _drain(task)
+            assert second is not first
+            assert agent.participant_settings["user_1"]["locale"] == "en-US"
+            assert (
+                registry.get_sample_value(
+                    "bbb_stt_active_sessions",
+                    {"provider": agent.provider_name, "locale": "pt-BR"},
+                )
+                == 0.0
+            )
+            assert (
+                registry.get_sample_value(
+                    "bbb_stt_active_sessions",
+                    {"provider": agent.provider_name, "locale": "en-US"},
+                )
+                == 1.0
+            )
+            await _drain(first, second)
 
     async def test_reasserting_the_running_locale_is_a_no_op(self):
         agent, _, _ = _agent_with_participant()

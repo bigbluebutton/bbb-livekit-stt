@@ -181,18 +181,6 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
     def _create_stt_stream(self, locale: str | None) -> stt.SpeechStream:
         raise NotImplementedError("VoxtralRealtime uses a custom pipeline")
 
-    def _update_stream_locale(self, user_id: str, locale: str):
-        """Restart the pipeline with the new locale.
-
-        No explicit gauge transition: stop and start already move the session
-        gauge between locale labels.
-        """
-        provider = self.participant_settings.get(user_id, {}).get(
-            "provider", "voxtral-realtime"
-        )
-        self.stop_transcription_for_user(user_id)
-        self.start_transcription_for_user(user_id, locale, provider)
-
     def start_transcription_for_user(self, user_id: str, locale: str, provider: str):
         settings = self.participant_settings.setdefault(user_id, {})
         settings["locale"] = locale

@@ -190,19 +190,6 @@ class GladiaSttAgent(BaseSttAgent):
 
         return self.stt.stream(language=locale)
 
-    def _update_stream_locale(self, user_id: str, locale: str):
-        info = self.processing_info[user_id]
-        sanitized_locale = self._sanitize_locale(locale)
-        # An empty languages list re-enables Gladia's auto-detection.
-        info["stream"].update_options(
-            languages=[sanitized_locale] if sanitized_locale else []
-        )
-        # The stream is updated in place, so the session survives: move its gauge
-        # to the new label rather than restarting it.
-        old_locale = info["metrics_locale"]
-        info["metrics_locale"] = locale
-        self.metrics.session_locale_changed(self.provider_name, old_locale, locale)
-
     def _should_emit(self, event: stt.SpeechEvent) -> bool:
         if event.type == stt.SpeechEventType.FINAL_TRANSCRIPT:
             min_confidence = self.config.min_confidence_final

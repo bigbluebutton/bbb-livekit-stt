@@ -24,6 +24,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 * fix: transcribe a participant's microphone track only
 * fix: close the provider streams when a transcription session ends
 * fix: stamp each transcript with its own session's start time
+* fix: restart a transcription session when its locale changes
 * build(docker): add LOG_LEVEL env var to control the container's log level
 * build: declare aiohttp and numpy as direct dependencies
 * build: count main.py in coverage

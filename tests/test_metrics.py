@@ -163,57 +163,6 @@ class TestSessionLifecycle:
         )
 
 
-class TestSessionLocaleChange:
-    def test_moves_the_gauge_from_the_old_locale_to_the_new_one(self):
-        """A stale label would leave a phantom session pinned to the old locale."""
-        registry = CollectorRegistry()
-        metrics = SttMetrics(registry)
-
-        metrics.session_started("gladia", "en-US")
-        metrics.session_locale_changed("gladia", "en-US", "pt-BR")
-
-        assert (
-            registry.get_sample_value(
-                "bbb_stt_active_sessions", {"provider": "gladia", "locale": "en-US"}
-            )
-            == 0.0
-        )
-        assert (
-            registry.get_sample_value(
-                "bbb_stt_active_sessions", {"provider": "gladia", "locale": "pt-BR"}
-            )
-            == 1.0
-        )
-
-    def test_does_not_count_a_new_session_start(self):
-        registry = CollectorRegistry()
-        metrics = SttMetrics(registry)
-
-        metrics.session_started("gladia", "en-US")
-        metrics.session_locale_changed("gladia", "en-US", "pt-BR")
-
-        assert (
-            registry.get_sample_value(
-                "bbb_stt_session_starts_total", {"provider": "gladia"}
-            )
-            == 1.0
-        )
-
-    def test_is_a_noop_when_the_locale_is_unchanged(self):
-        registry = CollectorRegistry()
-        metrics = SttMetrics(registry)
-
-        metrics.session_started("gladia", "en-US")
-        metrics.session_locale_changed("gladia", "en-US", "en-US")
-
-        assert (
-            registry.get_sample_value(
-                "bbb_stt_active_sessions", {"provider": "gladia", "locale": "en-US"}
-            )
-            == 1.0
-        )
-
-
 class TestTranscriptEmitted:
     def test_counts_the_transcript(self):
         registry = CollectorRegistry()

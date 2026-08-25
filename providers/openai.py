@@ -87,16 +87,6 @@ class OpenAiSttAgent(BaseSttAgent):
         """Not used: REST mode overrides start_transcription_for_user directly."""
         raise NotImplementedError("OpenAI REST mode does not use STT streams")
 
-    def _update_stream_locale(self, user_id: str, locale: str):
-        """Restart the pipeline with the new locale.
-
-        No explicit gauge transition: stop and start already move the session
-        gauge between locale labels.
-        """
-        provider = self.participant_settings.get(user_id, {}).get("provider", "openai")
-        self.stop_transcription_for_user(user_id)
-        self.start_transcription_for_user(user_id, locale, provider)
-
     # --- Override start_transcription_for_user to pass language, not a stream ---
 
     def start_transcription_for_user(self, user_id: str, locale: str, provider: str):

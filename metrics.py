@@ -154,20 +154,6 @@ class SttMetrics:
     def session_start_failed(self, provider: str, reason: str) -> None:
         self.session_start_failures.labels(provider=provider, reason=reason).inc()
 
-    def session_locale_changed(
-        self, provider: str, old_locale: str, new_locale: str
-    ) -> None:
-        """Move an active session's gauge to a new locale label.
-
-        The session continues, so this is not a new start. Leaving the old label
-        alone would strand a phantom session on it forever.
-        """
-        if old_locale == new_locale:
-            return
-
-        self.active_sessions.labels(provider=provider, locale=old_locale).dec()
-        self.active_sessions.labels(provider=provider, locale=new_locale).inc()
-
     # --- Transcripts ---
 
     def transcript_emitted(

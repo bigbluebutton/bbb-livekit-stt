@@ -79,11 +79,6 @@ class BaseSttAgent(EventEmitter, ABC):
         """
         ...
 
-    @abstractmethod
-    def _update_stream_locale(self, user_id: str, locale: str):
-        """Apply a locale change to an active stream. Provider subclasses implement."""
-        ...
-
     def _should_emit(self, event: stt.SpeechEvent) -> bool:
         """Filter events before emission. Override for provider-specific filtering."""
         return True
@@ -254,16 +249,29 @@ class BaseSttAgent(EventEmitter, ABC):
         self.metrics.session_stopped(self.provider_name, info["metrics_locale"])
 
     def update_locale_for_user(self, user_id: str, locale: str):
-        if user_id in self.participant_settings:
-            self.participant_settings[user_id]["locale"] = locale
+        """Move a participant to a new locale by restarting their session.
 
-        if user_id in self.processing_info:
-            logging.info(f"Updating locale to '{locale}' for user {user_id}.")
-            self._update_stream_locale(user_id, locale)
-        else:
+        Providers restart their clock when the language changes: Gladia opens a
+        fresh live session behind `update_options()`. An in-place update would
+        stamp transcripts against the old stream, dating them back by the
+        elapsed session and re-issuing transcript ids BBB already stored.
+        """
+        settings = self.participant_settings.get(user_id)
+
+        if user_id not in self.processing_info:
             logging.warning(
                 f"Won't update locale, no active transcription for user {user_id}."
             )
+            # Still worth recording: it is what the next track subscription
+            # starts transcription from.
+            if settings is not None:
+                settings["locale"] = locale
+            return
+
+        provider = (settings or {}).get("provider", self.provider_name)
+        logging.info(f"Updating locale to '{locale}' for user {user_id}.")
+        self.stop_transcription_for_user(user_id)
+        self.start_transcription_for_user(user_id, locale, provider)
 
     def _on_track_subscribed(
         self,

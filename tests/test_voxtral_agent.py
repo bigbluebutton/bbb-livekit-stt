@@ -1724,7 +1724,7 @@ class TestHandshakeTimeout:
 class TestLocaleUpdateRace:
     async def test_locale_change_does_not_orphan_replacement_pipeline(self):
         """
-        Regression for the stop→start restart race: _update_stream_locale
+        Regression for the stop→start restart race: update_locale_for_user
         cancels the old pipeline task and synchronously registers a new one
         under the same identity. task.cancel() only schedules the
         cancellation, so the old task's cleanup runs AFTER the new entry
@@ -1751,7 +1751,7 @@ class TestLocaleUpdateRace:
             task1 = agent.processing_info["user_1"]["task"]
             await asyncio.sleep(0.05)  # let pipeline 1 get going
 
-            agent._update_stream_locale("user_1", "de-DE")
+            agent.update_locale_for_user("user_1", "de-DE")
             task2 = agent.processing_info["user_1"]["task"]
             assert task2 is not task1
 

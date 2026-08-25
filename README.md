@@ -177,6 +177,11 @@ Caveats worth knowing:
   clears when the worker restarts. LiveKit's own `lk_agents_active_job_count` is
   affected identically, so `bbb_stt_active_agents` exceeding it indicates leaked
   series.
+- **A locale change restarts the participant's session.** It appears as a stop
+  and a start: `bbb_stt_session_starts_total` advances and the session gauge moves
+  between locale labels. A change the provider cannot honour therefore shows up as
+  a `bbb_stt_session_start_failures_total` tick, not as a session left running in
+  the old locale.
 - `bbb_stt_transcript_confidence` is only populated for Gladia as of now. Providers
   that do not report transcript confidence (e.g.: OpenAI) do not populate this histogram.
 

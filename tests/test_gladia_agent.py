@@ -114,51 +114,30 @@ class TestUpdateLocaleForUser:
 
         assert agent.participant_settings["user_1"]["locale"] == "fr"
 
-    def test_calls_stream_update_options_when_transcription_active(self):
-        agent = _make_agent()
-        agent.participant_settings["user_1"] = {"locale": "en", "provider": "gladia"}
-        mock_stream = MagicMock()
+    def test_restarts_the_session_when_transcription_is_active(self):
+        """A locale change restarts the session; see update_locale_for_user()."""
+        mock_track = MagicMock()
+        mock_track.kind = rtc.TrackKind.KIND_AUDIO
+        participant = _make_participant("user_1", audio_track=mock_track)
+        agent = _make_agent_with_room(participants={"pid": participant})
+        agent.participant_settings["user_1"] = {"locale": "en-US", "provider": "gladia"}
         agent.processing_info["user_1"] = {
-            "stream": mock_stream,
+            "stream": MagicMock(),
             "task": MagicMock(),
+            "track_sid": mock_track.sid,
             "metrics_locale": "en-US",
         }
 
-        agent.update_locale_for_user("user_1", "de")
+        with (
+            patch.object(agent, "stop_transcription_for_user") as mock_stop,
+            patch.object(agent, "start_transcription_for_user") as mock_start,
+        ):
+            agent.update_locale_for_user("user_1", "de-DE")
 
-        mock_stream.update_options.assert_called_once_with(languages=["de"])
+        mock_stop.assert_called_once_with("user_1")
+        mock_start.assert_called_once_with("user_1", "de-DE", "gladia")
 
-    def test_sends_empty_languages_for_auto_locale(self):
-        """'auto' locale should send empty languages list to trigger Gladia auto-detection."""
-        agent = _make_agent()
-        agent.participant_settings["user_1"] = {"locale": "en", "provider": "gladia"}
-        mock_stream = MagicMock()
-        agent.processing_info["user_1"] = {
-            "stream": mock_stream,
-            "task": MagicMock(),
-            "metrics_locale": "en-US",
-        }
-
-        agent.update_locale_for_user("user_1", "auto")
-
-        mock_stream.update_options.assert_called_once_with(languages=[])
-
-    def test_sanitizes_bcp47_locale_for_stream_update(self):
-        """update_locale_for_user should sanitize 'de-DE' → 'de' for the stream."""
-        agent = _make_agent()
-        agent.participant_settings["user_1"] = {"locale": "en", "provider": "gladia"}
-        mock_stream = MagicMock()
-        agent.processing_info["user_1"] = {
-            "stream": mock_stream,
-            "task": MagicMock(),
-            "metrics_locale": "en-US",
-        }
-
-        agent.update_locale_for_user("user_1", "de-DE")
-
-        mock_stream.update_options.assert_called_once_with(languages=["de"])
-
-    def test_does_not_call_update_options_when_no_active_transcription(self):
+    def test_does_not_restart_when_no_active_transcription(self):
         agent = _make_agent()
         agent.participant_settings["user_1"] = {"locale": "en", "provider": "gladia"}
 
@@ -542,54 +521,3 @@ class TestProviderCapabilities:
             translation_enabled=True, translation_target_languages=["pt"]
         )
         assert agent.translation_enabled is True
-
-
-class TestLocaleChangeGauge:
-    def test_moves_the_session_gauge_to_the_new_locale(self):
-        """Gladia updates the stream in place, so the session survives the change
-        and the gauge must follow it rather than be restarted."""
-        agent, registry = _make_metered_agent()
-        stream = MagicMock()
-        agent.processing_info["user_1"] = {
-            "stream": stream,
-            "task": MagicMock(),
-            "metrics_locale": "en-US",
-        }
-        agent.participant_settings["user_1"] = {"locale": "en-US"}
-        agent.metrics.session_started("gladia", "en-US")
-
-        agent.update_locale_for_user("user_1", "pt-BR")
-
-        stream.update_options.assert_called_once_with(languages=["pt"])
-        assert agent.processing_info["user_1"]["metrics_locale"] == "pt-BR"
-        assert (
-            registry.get_sample_value(
-                "bbb_stt_active_sessions", {"provider": "gladia", "locale": "en-US"}
-            )
-            == 0.0
-        )
-        assert (
-            registry.get_sample_value(
-                "bbb_stt_active_sessions", {"provider": "gladia", "locale": "pt-BR"}
-            )
-            == 1.0
-        )
-
-    def test_does_not_count_a_new_session_start(self):
-        agent, registry = _make_metered_agent()
-        agent.processing_info["user_1"] = {
-            "stream": MagicMock(),
-            "task": MagicMock(),
-            "metrics_locale": "en-US",
-        }
-        agent.participant_settings["user_1"] = {"locale": "en-US"}
-        agent.metrics.session_started("gladia", "en-US")
-
-        agent.update_locale_for_user("user_1", "pt-BR")
-
-        assert (
-            registry.get_sample_value(
-                "bbb_stt_session_starts_total", {"provider": "gladia"}
-            )
-            == 1.0
-        )
