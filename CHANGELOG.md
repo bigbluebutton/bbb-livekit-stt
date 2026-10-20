@@ -7,6 +7,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 
 ## UNRELEASED
 
+* feat: stream transcripts to the agents in the LiveKit room (`AGENT_TRANSCRIPTS_ENABLED`)
 * feat(openai): add OpenAI STT provider support (official and compatible endpoints)
 * feat: add GladiaSttAgent provider and factory
 * refactor: extract BaseSttAgent and BaseSttConfig into providers/base.py
