@@ -80,6 +80,9 @@ dependencies, run the agent, and run tests.
 - **`load_env.py`** — loads `.env`; `main.py` imports it first, before anything
   reads the environment.
 - **`events.py`** — minimal async `EventEmitter`, the base of `BaseSttAgent`.
+- **`transcript_stream.py`** — `publish_transcript()`: with `AGENT_TRANSCRIPTS_ENABLED`,
+  each transcript also goes into the LiveKit room as an `lk.transcription` text
+  stream, sent on behalf of the speaker and only to agent participants.
 - **`utils.py`** — `resolve_bbb_locale()` plus coercion helpers for values arriving
   over Redis (`coerce_partial_utterances`, `coerce_min_utterance_length_seconds`).
 
@@ -97,6 +100,8 @@ dependencies, run the agent, and run tests.
    one the audio was transcribed under; the participant may have changed it since.
    Speech options are read live instead.
 5. `RedisManager` publishes `UpdateTranscriptPubMsg` back to BBB.
+6. With `AGENT_TRANSCRIPTS_ENABLED`, `publish_transcript()` also streams it to the
+   agents in the LiveKit room (`lk.transcription`, same id as the Redis `transcriptId`).
 
 ### Locale handling
 

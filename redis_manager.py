@@ -5,6 +5,7 @@ import time
 import redis.asyncio as redis
 from config import RedisConfig
 from livekit.agents.stt import SpeechData
+from utils import transcript_id
 
 # Pause before the listener tries again after a Redis error.
 _LISTEN_RETRY_S = 1.0
@@ -149,7 +150,7 @@ class RedisManager:
                     "userId": user_id,
                 },
                 "body": {
-                    "transcriptId": f"{user_id}-{locale}-{start}",
+                    "transcriptId": transcript_id(user_id, locale, start),
                     "start": str(start),
                     "end": str(end),
                     "text": "",

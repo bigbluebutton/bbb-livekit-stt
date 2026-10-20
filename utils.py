@@ -39,6 +39,11 @@ def resolve_bbb_locale(
     return bbb_locale
 
 
+def transcript_id(user_id: str, locale: str, start: int) -> str:
+    """Identify one utterance; its interim and final transcripts share it."""
+    return f"{user_id}-{locale}-{start}"
+
+
 def coerce_partial_utterances(value: object, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
