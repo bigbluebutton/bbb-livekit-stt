@@ -10,11 +10,18 @@ from livekit import rtc
 
 from redis_manager import RedisManager
 from providers import create_agent
-from config import get_redacted_app_config, redis_config, stt_provider
+from config import (
+    agent_transcripts_enabled,
+    get_redacted_app_config,
+    redis_config,
+    stt_provider,
+)
+from transcript_stream import publish_transcript
 from utils import (
     coerce_min_utterance_length_seconds,
     coerce_partial_utterances,
     resolve_bbb_locale,
+    transcript_id,
 )
 
 load_dotenv()
@@ -154,6 +161,17 @@ async def entrypoint(ctx: JobContext):
                 end_time_adjusted,
                 result=True,
             )
+            if agent_transcripts_enabled:
+                await publish_transcript(
+                    agent.room,
+                    participant,
+                    text,
+                    bbb_locale,
+                    transcript_id(
+                        participant.identity, bbb_locale, start_time_adjusted
+                    ),
+                    final=True,
+                )
 
     @agent.on("interim_transcript")
     async def on_interim_transcript(
@@ -245,6 +263,17 @@ async def entrypoint(ctx: JobContext):
                 end_time_adjusted,
                 result=False,
             )
+            if agent_transcripts_enabled:
+                await publish_transcript(
+                    agent.room,
+                    participant,
+                    text,
+                    bbb_locale,
+                    transcript_id(
+                        participant.identity, bbb_locale, start_time_adjusted
+                    ),
+                    final=False,
+                )
 
     redis_listen_task = asyncio.create_task(redis_manager.listen(on_redis_message))
 

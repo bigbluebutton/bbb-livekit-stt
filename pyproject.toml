@@ -29,7 +29,7 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.coverage.run]
-source = ["config", "events", "providers", "redis_manager", "utils"]
+source = ["config", "events", "providers", "redis_manager", "transcript_stream", "utils"]
 omit = ["tests/*"]
 
 [tool.coverage.report]

@@ -112,6 +112,15 @@ docker run --network host --rm -it --env-file .env -e LOG_LEVEL=DEBUG bbb-liveki
 
 Pre-built images are available via GitHub Container Registry as well.
 
+### Transcripts for other agents
+
+Set `AGENT_TRANSCRIPTS_ENABLED=true` to also stream each transcript into the LiveKit
+room, so another LiveKit agent in the meeting (an assistant, for instance) can follow
+it without reading BBB's Redis. Each utterance is a text stream on LiveKit's
+`lk.transcription` topic, sent on behalf of the speaker, with the
+`lk.transcribed_track_id`, `lk.segment_id` and `lk.transcription_final` attributes
+plus `bbb.locale`. Only agent participants receive it; end users' clients never do.
+
 ### OpenAI STT provider
 
 Set `STT_PROVIDER=openai` to use OpenAI STT instead of Gladia.
