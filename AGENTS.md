@@ -27,8 +27,9 @@ dependencies, run the agent, and run tests.
 - **`main.py`** — registers the LiveKit worker via `cli.run_app(WorkerOptions)`.
   `entrypoint()` wires up `RedisManager`, the STT agent (via `create_agent()`), and
   the final/interim transcript handlers, and routes Redis messages for locale and
-  speech-option changes. Its `prewarm_fnc` calls `prewarm_provider()` so a provider
-  with slow assets loads them once per worker process rather than once per room.
+  speech-option changes and user removal. Its `prewarm_fnc` calls
+  `prewarm_provider()` so a provider with slow assets loads them once per worker
+  process rather than once per room.
   Provider-agnostic: no references to any specific provider.
 - **`providers/`** — STT provider abstraction:
   - **`__init__.py`** — factory
@@ -72,7 +73,7 @@ dependencies, run the agent, and run tests.
   config redaction. Provider configs live in `providers/`, not here.
 - **`redis_manager.py`** — async Redis pub/sub. Publishes `UpdateTranscriptPubMsg`
   to `to-akka-apps-redis-channel`; listens on `from-akka-apps-redis-channel` for
-  locale and speech-option change events.
+  locale and speech-option change events and `UserLeftMeetingEvtMsg`.
 - **`events.py`** — minimal async `EventEmitter`, the base of `BaseSttAgent`.
 - **`utils.py`** — `resolve_bbb_locale()` plus coercion helpers for values arriving
   over Redis (`coerce_partial_utterances`, `coerce_min_utterance_length_seconds`).

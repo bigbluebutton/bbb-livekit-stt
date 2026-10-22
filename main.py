@@ -51,6 +51,7 @@ async def entrypoint(ctx: JobContext):
             if event_name not in (
                 RedisManager.USER_SPEECH_LOCALE_CHANGED_EVT_MSG,
                 RedisManager.USER_SPEECH_OPTIONS_CHANGED_EVT_MSG,
+                RedisManager.USER_LEFT_MEETING_EVT_MSG,
             ):
                 return
 
@@ -67,7 +68,7 @@ async def entrypoint(ctx: JobContext):
                 provider = body.get("provider")
 
                 if not (provider and locale):
-                    agent.stop_transcription_for_user(user_id)
+                    agent.disable_transcription_for_user(user_id)
                 else:
                     current_locale = agent.participant_settings.get(user_id, {}).get(
                         "locale"
@@ -88,6 +89,9 @@ async def entrypoint(ctx: JobContext):
                 settings["partial_utterances"] = partial_utterances
                 settings["min_utterance_length"] = min_utterance_length
                 logging.info(f"User speech options changed for {user_id}: {settings}")
+
+            elif event_name == RedisManager.USER_LEFT_MEETING_EVT_MSG:
+                agent.disable_transcription_for_user(user_id)
 
         except json.JSONDecodeError:
             logging.warning(f"Could not decode Redis message: {message_data}")
