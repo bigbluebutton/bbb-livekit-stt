@@ -16,6 +16,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 * build: declare aiohttp and numpy as direct dependencies
 * docs: correct how the OpenAI provider reaches the API and list its caveats
 * docs: expand and correct AGENTS.md
+* feat(voxtral): Voxtral Realtime STT provider with concurrent streaming and Silero neural VAD on Python 3.11
 
 ## v0.3.0
 

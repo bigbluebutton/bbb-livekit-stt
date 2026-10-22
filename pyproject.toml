@@ -3,9 +3,9 @@ name = "bbb-livekit-stt"
 version = "0.3.0"
 description = "Provides STT for BigBlueButton meetings using LiveKit as their audio bridge."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
-    "livekit-agents[gladia]~=1.4",
+    "livekit-agents[gladia,silero]~=1.4",
     "python-dotenv~=1.1.1",
     "redis~=6.4.0",
     "nest-asyncio~=1.6.0",

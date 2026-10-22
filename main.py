@@ -5,11 +5,11 @@ import math
 
 import nest_asyncio
 from dotenv import load_dotenv
-from livekit.agents import JobContext, WorkerOptions, cli, stt
+from livekit.agents import JobContext, JobProcess, WorkerOptions, cli, stt
 from livekit import rtc
 
 from redis_manager import RedisManager
-from providers import create_agent
+from providers import create_agent, prewarm_provider
 from config import get_redacted_app_config, redis_config, stt_provider
 from utils import (
     coerce_min_utterance_length_seconds,
@@ -27,11 +27,17 @@ def _log_startup_configuration(stt_config):
     )
 
 
+def prewarm(proc: JobProcess):
+    # Runs once per worker process, before any job is assigned. Providers that
+    # need to load models do it here rather than per room.
+    prewarm_provider(stt_provider, proc.userdata)
+
+
 async def entrypoint(ctx: JobContext):
     nest_asyncio.apply()
 
     redis_manager = RedisManager(redis_config)
-    agent = create_agent(stt_provider)
+    agent = create_agent(stt_provider, ctx.proc.userdata)
 
     _log_startup_configuration(agent.config)
 
@@ -262,5 +268,5 @@ async def entrypoint(ctx: JobContext):
 
 
 if __name__ == "__main__":
-    opts = WorkerOptions(entrypoint_fnc=entrypoint)
+    opts = WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm)
     cli.run_app(opts)

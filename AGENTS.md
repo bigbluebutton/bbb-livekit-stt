@@ -27,10 +27,16 @@ dependencies, run the agent, and run tests.
 - **`main.py`** — registers the LiveKit worker via `cli.run_app(WorkerOptions)`.
   `entrypoint()` wires up `RedisManager`, the STT agent (via `create_agent()`), and
   the final/interim transcript handlers, and routes Redis messages for locale and
-  speech-option changes. Provider-agnostic: no references to any specific provider.
+  speech-option changes. Its `prewarm_fnc` calls `prewarm_provider()` so a provider
+  with slow assets loads them once per worker process rather than once per room.
+  Provider-agnostic: no references to any specific provider.
 - **`providers/`** — STT provider abstraction:
-  - **`__init__.py`** — factory `create_agent(provider) -> BaseSttAgent`, accepting
-    `"gladia"` and `"openai"`.
+  - **`__init__.py`** — factory
+    `create_agent(provider, userdata=None) -> BaseSttAgent`, accepting `"gladia"`,
+    `"openai"` and `"voxtral-realtime"`, plus `prewarm_provider(provider, userdata)`
+    for the worker's prewarm hook. `create_agent()` is the only validator of the
+    provider name; `prewarm_provider()` ignores an unknown one so a bad name cannot
+    kill the worker before it reports the real error.
   - **`base.py`** — `BaseSttAgent(EventEmitter, ABC)` + `BaseSttConfig`. All
     provider-agnostic logic: room management, track subscription, audio pipeline,
     event emission, `_sanitize_locale()`.
@@ -46,6 +52,21 @@ dependencies, run the agent, and run tests.
     wholesale, segments audio locally with an RMS silence detector, raises
     `NotImplementedError` from `_create_stt_stream()`, and restarts the pipeline in
     `_update_stream_locale()`. No confidence filtering, no translation.
+  - **`voxtral_realtime.py`** — `VoxtralRealtimeSttAgent` + `VoxtralRealtimeConfig`
+    and the `voxtral_realtime_config` singleton, for
+    [Voxtral Mini Realtime](https://huggingface.co/mistralai/Voxtral-Mini-4B-Realtime-2602)
+    served by a self-hosted [vLLM](https://docs.vllm.ai/). A direct `aiohttp`
+    WebSocket client against `{base_url}/realtime?intent=transcription`: vLLM's
+    realtime protocol is not the OpenAI Realtime one (flat `session.update`, no
+    server-side VAD, `transcription.delta`/`transcription.done` events). Like
+    `openai.py` it overrides `start_transcription_for_user()` and
+    `_run_transcription_pipeline()` wholesale and raises `NotImplementedError` from
+    `_create_stt_stream()`, but it segments speech with a Silero VAD (loaded once
+    per worker process via `prewarm()`) and streams audio while a request is open,
+    so it emits live interims. No confidence filtering, no translation, and no
+    language in either direction — vLLM's realtime API has no field to request
+    one and reports none back, so `"auto"` is not usable and a transcript is
+    labelled with the locale the participant selected. See the README's caveats.
 - **`config.py`** — `RedisConfig` + the `redis_config` singleton, the `stt_provider`
   env var, env-var helpers (`_get_float_env`, `_get_bool_env`, …), and startup
   config redaction. Provider configs live in `providers/`, not here.
@@ -89,16 +110,24 @@ without translation support.
    override `_should_emit()` and `translation_lang_map`.
 3. **Handle a `None` locale** in both — it is how `"auto"` reaches a provider.
    Omitting the language is what enables server-side detection.
-4. Register it in the factory in `providers/__init__.py`.
+4. Register it in the factory in `providers/__init__.py`; if it loads slow assets
+   (a local model), give it a `prewarm(userdata)` and dispatch to it from
+   `prewarm_provider()` too.
 5. `providers/gladia.py` is the reference implementation for stream-based providers;
-   `providers/openai.py` for providers that need their own pipeline.
+   `providers/openai.py` for providers that need their own pipeline, and
+   `providers/voxtral_realtime.py` for one that also does its own VAD and
+   segmentation.
 
 ## Setup
 
-Requires Python 3.10+ (`.python-version` pins 3.10). Copy `.env.example` to `.env`
-and fill in at least `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, and a
-provider key — `GLADIA_API_KEY` by default, or `OPENAI_API_KEY` alongside
-`STT_PROVIDER=openai`.
+Requires Python 3.11+ (`.python-version` pins 3.11: the Silero VAD used by the
+`voxtral-realtime` provider pulls in onnxruntime, which dropped its Python 3.10
+wheels in 1.24). Copy `.env.example`
+to `.env` and fill in at least `LIVEKIT_URL`, `LIVEKIT_API_KEY`,
+`LIVEKIT_API_SECRET`, and a provider key — `GLADIA_API_KEY` by default,
+`OPENAI_API_KEY` alongside `STT_PROVIDER=openai`, or `VOXTRAL_BASE_URL` alongside
+`STT_PROVIDER=voxtral-realtime` (`VOXTRAL_API_KEY` only if the server enforces
+one).
 
 ## Commands
 
@@ -150,12 +179,16 @@ until they pass. Do not add tests for input shapes the callers cannot produce.
   imports like `from config import ...`. Moving files into a package means updating
   this and every import.
 - **Config singletons**: `redis_config` is built at import time in `config.py`;
-  `gladia_config` and `openai_config` in their provider modules. All read env vars
-  at import. In tests, set env vars before importing or construct the config
-  directly (e.g. `GladiaConfig(api_key="fake-key")`).
+  `gladia_config`, `openai_config` and `voxtral_realtime_config` in their provider
+  modules. All read env vars at import. In tests, set env vars before importing or
+  construct the config directly (e.g. `GladiaConfig(api_key="fake-key")`).
+  `VoxtralRealtimeConfig` additionally needs a `base_url` — the agent's constructor
+  raises `ValueError` without one.
 - **Test patch targets**: patch at the import location — `"providers.gladia.GladiaSTT"`,
   not `"livekit.plugins.gladia.STT"`; `"providers.base.rtc.AudioStream"` for the
-  shared audio pipeline, `"providers.openai.rtc.AudioStream"` for OpenAI's own.
+  shared audio pipeline, `"providers.openai.rtc.AudioStream"` and
+  `"providers.voxtral_realtime.rtc.AudioStream"` for the providers that run their
+  own.
 
 ## LiveKit documentation
 
