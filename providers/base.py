@@ -130,6 +130,14 @@ class BaseSttAgent(EventEmitter, ABC):
             info["task"].cancel()
             logging.info(f"Stopped transcription for user {user_id}.")
 
+    def disable_transcription_for_user(self, user_id: str):
+        """The user turned transcription off: stop it and forget their locale, so a
+        reconnect does not start it again."""
+        self.stop_transcription_for_user(user_id)
+        settings = self.participant_settings.get(user_id, {})
+        settings.pop("locale", None)
+        settings.pop("provider", None)
+
     def update_locale_for_user(self, user_id: str, locale: str):
         if user_id in self.participant_settings:
             self.participant_settings[user_id]["locale"] = locale
@@ -183,7 +191,8 @@ class BaseSttAgent(EventEmitter, ABC):
             f"Participant {participant.identity} disconnected, stopping transcription."
         )
         self.stop_transcription_for_user(participant.identity)
-        self.participant_settings.pop(participant.identity, None)
+        # Settings stay: BBB announces a speech locale only when it is set, not when
+        # the user reconnects, so a returning user would never be transcribed again.
 
     def _on_disconnected(self):
         self._shutdown.set()
