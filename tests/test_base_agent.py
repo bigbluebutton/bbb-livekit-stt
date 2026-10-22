@@ -94,3 +94,43 @@ class TestShouldEmitIntegration:
             await asyncio.sleep(0)
 
         assert len(emitted) == 1
+
+
+def _microphone(identity="user_1"):
+    participant = MagicMock(spec=rtc.RemoteParticipant)
+    participant.identity = identity
+    publication = MagicMock()
+    publication.source = rtc.TrackSource.SOURCE_MICROPHONE
+    return participant, publication
+
+
+class TestSettingsAcrossReconnects:
+    """BBB announces a speech locale only when it is set, not when the user comes back."""
+
+    def test_a_returning_participant_is_transcribed_again(self):
+        agent = _make_stub_agent()
+        agent.participant_settings["user_1"] = {"locale": "pt-BR", "provider": "gladia"}
+        participant, publication = _microphone()
+
+        agent._on_participant_disconnected(participant)
+        with patch.object(agent, "start_transcription_for_user") as start:
+            agent._on_track_subscribed(MagicMock(), publication, participant)
+
+        start.assert_called_once_with("user_1", "pt-BR", "gladia")
+
+    def test_transcription_turned_off_stays_off_when_the_participant_returns(self):
+        agent = _make_stub_agent()
+        agent.participant_settings["user_1"] = {
+            "locale": "pt-BR",
+            "provider": "gladia",
+            "partial_utterances": True,
+        }
+        participant, publication = _microphone()
+
+        agent.disable_transcription_for_user("user_1")
+        agent._on_participant_disconnected(participant)
+        with patch.object(agent, "start_transcription_for_user") as start:
+            agent._on_track_subscribed(MagicMock(), publication, participant)
+
+        start.assert_not_called()
+        assert agent.participant_settings["user_1"] == {"partial_utterances": True}

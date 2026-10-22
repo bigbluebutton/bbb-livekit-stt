@@ -155,7 +155,7 @@ class TestUpdateLocaleForUser:
 
 
 class TestOnParticipantDisconnected:
-    def test_stops_transcription_and_clears_settings(self):
+    def test_stops_transcription_and_keeps_settings(self):
         agent = _make_agent()
         agent.participant_settings["user_1"] = {"locale": "en", "provider": "gladia"}
         mock_task = MagicMock()
@@ -168,7 +168,10 @@ class TestOnParticipantDisconnected:
 
         mock_task.cancel.assert_called_once()
         assert "user_1" not in agent.processing_info
-        assert "user_1" not in agent.participant_settings
+        assert agent.participant_settings["user_1"] == {
+            "locale": "en",
+            "provider": "gladia",
+        }
 
     def test_no_op_for_unknown_participant(self):
         agent = _make_agent()

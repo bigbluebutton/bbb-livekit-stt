@@ -67,7 +67,7 @@ async def entrypoint(ctx: JobContext):
                 provider = body.get("provider")
 
                 if not (provider and locale):
-                    agent.stop_transcription_for_user(user_id)
+                    agent.disable_transcription_for_user(user_id)
                 else:
                     current_locale = agent.participant_settings.get(user_id, {}).get(
                         "locale"
