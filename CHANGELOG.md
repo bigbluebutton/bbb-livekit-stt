@@ -5,10 +5,11 @@ Intermediate pre-release changes will only be registered *separately* in their
 respective tag's CHANGELOG.
 Final releases will consolidate all intermediate changes in chronological order.
 
-## UNRELEASED
+## v0.4.0
 
 * feat(openai): add OpenAI STT provider support (official and compatible endpoints)
 * feat: add GladiaSttAgent provider and factory
+* feat(voxtral): Voxtral Realtime STT provider with concurrent streaming and Silero neural VAD on Python 3.11
 * feat: add Prometheus collectors for the STT agent
 * feat: expose Prometheus metrics behind BBB_STT_PROMETHEUS_PORT
 * feat: instrument session lifecycle across the STT providers
@@ -41,7 +42,6 @@ Final releases will consolidate all intermediate changes in chronological order.
 * build: count main.py in coverage
 * docs: correct how the OpenAI provider reaches the API and list its caveats
 * docs: expand and correct AGENTS.md
-* feat(voxtral): Voxtral Realtime STT provider with concurrent streaming and Silero neural VAD on Python 3.11
 * docs: document Prometheus metrics and their operational caveats
 * docs: document the transcription session lifecycle contracts
 * docs: correct the session lifecycle and locale-change contracts
