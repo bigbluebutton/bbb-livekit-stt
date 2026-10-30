@@ -285,6 +285,12 @@ class BaseSttAgent(EventEmitter, ABC):
 
         logging.info(f"Stopped transcription for user {user_id}.")
 
+    def _publishes_interims(self, user_id: str) -> bool:
+        """Whether this participant's interims reach BBB: main.py publishes them
+        only to a participant who asked for partial utterances."""
+        settings = self.participant_settings.get(user_id, {})
+        return bool(self.config.interim_results and settings.get("partial_utterances"))
+
     def _spawn_pipeline(self, pipeline) -> asyncio.Task:
         task = asyncio.create_task(pipeline)
         self._pipelines.add(task)
@@ -468,6 +474,11 @@ class BaseSttAgent(EventEmitter, ABC):
 
         async def process_stt_task():
             async for event in stt_stream:
+                is_interim = event.type == stt.SpeechEventType.INTERIM_TRANSCRIPT
+                if is_interim and not self._publishes_interims(participant.identity):
+                    # Dropped before the confidence filter: an interim the
+                    # agent never publishes is not a discard.
+                    continue
                 if not self._should_emit(event):
                     continue
                 if event.type == stt.SpeechEventType.FINAL_TRANSCRIPT:
@@ -478,10 +489,7 @@ class BaseSttAgent(EventEmitter, ABC):
                         open_time=open_time,
                         locale=locale,
                     )
-                elif (
-                    event.type == stt.SpeechEventType.INTERIM_TRANSCRIPT
-                    and self.config.interim_results
-                ):
+                elif is_interim:
                     self.emit(
                         "interim_transcript",
                         participant=participant,

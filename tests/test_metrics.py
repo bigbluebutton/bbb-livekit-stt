@@ -233,12 +233,16 @@ class TestTranscriptDiscarded:
         registry = CollectorRegistry()
         metrics = SttMetrics(registry)
 
-        metrics.transcript_discarded("gladia", DISCARD_LOW_CONFIDENCE)
+        metrics.transcript_discarded("gladia", "interim", DISCARD_LOW_CONFIDENCE)
 
         assert (
             registry.get_sample_value(
                 "bbb_stt_transcripts_discarded_total",
-                {"provider": "gladia", "reason": DISCARD_LOW_CONFIDENCE},
+                {
+                    "provider": "gladia",
+                    "event_type": "interim",
+                    "reason": DISCARD_LOW_CONFIDENCE,
+                },
             )
             == 1.0
         )

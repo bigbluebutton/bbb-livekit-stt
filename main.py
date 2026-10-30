@@ -160,7 +160,7 @@ async def entrypoint(ctx: JobContext):
                     f"to publish it under."
                 )
                 stt_metrics.transcript_discarded(
-                    agent.provider_name, DISCARD_UNRESOLVABLE_LOCALE
+                    agent.provider_name, EVENT_TYPE_FINAL, DISCARD_UNRESOLVABLE_LOCALE
                 )
                 continue
 
@@ -243,7 +243,9 @@ async def entrypoint(ctx: JobContext):
                     },
                 )
                 stt_metrics.transcript_discarded(
-                    agent.provider_name, DISCARD_BELOW_MIN_UTTERANCE_LENGTH
+                    agent.provider_name,
+                    EVENT_TYPE_INTERIM,
+                    DISCARD_BELOW_MIN_UTTERANCE_LENGTH,
                 )
                 continue
 
@@ -274,7 +276,7 @@ async def entrypoint(ctx: JobContext):
                     f"to publish it under."
                 )
                 stt_metrics.transcript_discarded(
-                    agent.provider_name, DISCARD_UNRESOLVABLE_LOCALE
+                    agent.provider_name, EVENT_TYPE_INTERIM, DISCARD_UNRESOLVABLE_LOCALE
                 )
                 continue
 

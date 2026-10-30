@@ -149,7 +149,7 @@ load, child process count).
 | `bbb_stt_session_start_failures_total` | Counter | `provider`, `reason` | Sessions that could not be established |
 | `bbb_stt_agent_start_failures_total` | Counter | `provider`, `reason` | Agents that could not be established |
 | `bbb_stt_transcripts_total` | Counter | `provider`, `event_type` | Transcripts that passed filtering and were sent to BBB |
-| `bbb_stt_transcripts_discarded_total` | Counter | `provider`, `reason` | Transcripts dropped before publication |
+| `bbb_stt_transcripts_discarded_total` | Counter | `provider`, `event_type`, `reason` | Transcripts dropped before publication |
 | `bbb_stt_transcript_confidence` | Histogram | `provider`, `event_type` | Confidence of published transcripts (Gladia only) |
 | `bbb_stt_utterance_duration_seconds` | Histogram | `provider`, `event_type` | Duration of transcribed utterances |
 | `bbb_stt_provider_audio_seconds_total` | Counter | `provider` | Audio seconds sent to the provider, as counted by the Gladia plugin (Gladia only) |

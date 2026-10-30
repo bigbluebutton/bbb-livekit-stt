@@ -396,8 +396,10 @@ class TestRunTranscriptionPipeline:
         assert emitted[0]["event"] is mock_event
 
     async def test_emits_interim_transcript_when_enabled(self):
-        """INTERIM_TRANSCRIPT events should be emitted only when interim_results is set."""
+        """INTERIM_TRANSCRIPT events should be emitted only when interim_results is set
+        and the participant asked for partial utterances."""
         agent = _make_agent(interim_results=True)
+        agent.participant_settings["user_1"] = {"partial_utterances": True}
         mock_participant = MagicMock(spec=rtc.RemoteParticipant)
         mock_participant.identity = "user_1"
         mock_track = MagicMock()

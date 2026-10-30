@@ -13,7 +13,12 @@ from config import (
     _get_list_env,
     _get_map_env,
 )
-from metrics import DISCARD_LOW_CONFIDENCE, SttMetrics
+from metrics import (
+    DISCARD_LOW_CONFIDENCE,
+    EVENT_TYPE_FINAL,
+    EVENT_TYPE_INTERIM,
+    SttMetrics,
+)
 from providers.base import BaseSttAgent, BaseSttConfig
 
 DEFAULT_TRANSLATION_LANG_MAP = "de:de-DE,en:en-US,es:es-ES,fr:fr-FR,hi:hi-IN,it:it-IT,ja:ja-JP,pt:pt-BR,ru:ru-RU,zh:zh-CN"
@@ -193,8 +198,10 @@ class GladiaSttAgent(BaseSttAgent):
     def _should_emit(self, event: stt.SpeechEvent) -> bool:
         if event.type == stt.SpeechEventType.FINAL_TRANSCRIPT:
             min_confidence = self.config.min_confidence_final
+            event_type = EVENT_TYPE_FINAL
         elif event.type == stt.SpeechEventType.INTERIM_TRANSCRIPT:
             min_confidence = self.config.min_confidence_interim
+            event_type = EVENT_TYPE_INTERIM
         else:
             return True
 
@@ -205,7 +212,7 @@ class GladiaSttAgent(BaseSttAgent):
                     f"({alt.confidence} < {min_confidence})."
                 )
                 self.metrics.transcript_discarded(
-                    self.provider_name, DISCARD_LOW_CONFIDENCE
+                    self.provider_name, event_type, DISCARD_LOW_CONFIDENCE
                 )
                 return False
 

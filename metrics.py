@@ -94,7 +94,7 @@ class SttMetrics:
         self.transcripts_discarded = Counter(
             "bbb_stt_transcripts_discarded_total",
             "Transcripts dropped before publication",
-            ["provider", "reason"],
+            ["provider", "event_type", "reason"],
             registry=registry,
         )
         self.transcript_confidence = Histogram(
@@ -179,8 +179,10 @@ class SttMetrics:
                 provider=provider, event_type=event_type
             ).observe(duration_seconds)
 
-    def transcript_discarded(self, provider: str, reason: str) -> None:
-        self.transcripts_discarded.labels(provider=provider, reason=reason).inc()
+    def transcript_discarded(self, provider: str, event_type: str, reason: str) -> None:
+        self.transcripts_discarded.labels(
+            provider=provider, event_type=event_type, reason=reason
+        ).inc()
 
     def provider_audio_observed(self, provider: str, seconds: float) -> None:
         """Accumulate audio seconds sent to the provider, as its plugin reports them.
