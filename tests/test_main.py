@@ -380,6 +380,45 @@ class TestJobShutdown:
             await asyncio.wait_for(task, timeout=2)
             aclose.assert_awaited_once()
 
+    @pytest.mark.parametrize("connect_succeeds", [True, False])
+    async def test_a_shutdown_during_connect_starts_nothing(self, connect_succeeds):
+        """Teardown can close the Redis clients while connect() is still pinging
+        them. No listener may start afterwards. A connect that the teardown cut
+        short is not recorded as a start failure."""
+        agent = StubAgent()
+        connecting = asyncio.Event()
+        connected = asyncio.Event()
+
+        async def slow_connect(*_):
+            connecting.set()
+            await connected.wait()
+            return connect_succeeds
+
+        listen = AsyncMock()
+        metrics = MagicMock()
+        ctx = MagicMock()
+        ctx.room.name = "meeting-1"
+
+        with (
+            patch("main.create_agent", return_value=agent),
+            patch("main.stt_metrics", metrics),
+            patch.object(RedisManager, "connect", slow_connect),
+            patch.object(RedisManager, "listen", listen),
+            patch.object(RedisManager, "aclose", AsyncMock()),
+            patch("main.nest_asyncio.apply"),
+            patch("main.get_redacted_app_config", return_value={}),
+        ):
+            task = asyncio.create_task(main.entrypoint(ctx))
+            await asyncio.wait_for(connecting.wait(), timeout=2)
+
+            (callback,) = ctx.add_shutdown_callback.call_args.args
+            await asyncio.wait_for(callback(), timeout=2)
+            connected.set()
+            await asyncio.wait_for(task, timeout=2)
+
+        listen.assert_not_called()
+        metrics.agent_start_failed.assert_not_called()
+
 
 class TestMetricsWorkerOptions:
     def test_no_port_means_no_listener(self, monkeypatch):
@@ -405,3 +444,30 @@ class TestMetricsWorkerOptions:
             for r in caplog.records
             if r.levelname == "WARNING"
         )
+
+
+class TestRedisDownAtJobStart:
+    async def test_the_job_ends_cleanly_and_closes_redis(self, monkeypatch):
+        """With nothing listening on the Redis port, the job must still end
+        cleanly and close the Redis clients."""
+        monkeypatch.setattr(main.redis_config, "host", "127.0.0.1")
+        monkeypatch.setattr(main.redis_config, "port", 1)
+        agent = StubAgent()
+        aclose = AsyncMock()
+        ctx = MagicMock()
+        ctx.room.name = "meeting-1"
+
+        with (
+            patch("main.create_agent", return_value=agent),
+            patch.object(RedisManager, "aclose", aclose),
+            patch("main.nest_asyncio.apply"),
+            patch("main.get_redacted_app_config", return_value={}),
+        ):
+            task = asyncio.create_task(main.entrypoint(ctx))
+            await asyncio.wait_for(agent.running.wait(), timeout=5)
+            for _ in range(10):
+                await asyncio.sleep(0)
+            agent.release.set()
+            await asyncio.wait_for(task, timeout=5)
+
+        aclose.assert_awaited_once()

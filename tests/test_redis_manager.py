@@ -1,3 +1,4 @@
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from livekit.agents.stt import SpeechData
@@ -175,3 +176,33 @@ class TestPublishReturnValue:
         )
 
         assert result is False
+
+
+class TestListen:
+    async def test_a_failed_subscribe_is_retried(self, monkeypatch):
+        """A subscribe that fails must not end the listener for the whole job."""
+        manager = _make_manager()
+        received = []
+
+        message = {"type": "message", "data": b"hello"}
+        pubsub = AsyncMock()
+        pubsub.subscribe = AsyncMock(side_effect=[ConnectionError("down"), None])
+        pubsub.get_message = AsyncMock(side_effect=[message] + [None] * 1000)
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=pubsub)
+        context.__aexit__ = AsyncMock(return_value=False)
+        manager.sub_client = MagicMock()
+        manager.sub_client.pubsub = MagicMock(return_value=context)
+
+        async def callback(data):
+            received.append(data)
+
+        monkeypatch.setattr("redis_manager._LISTEN_RETRY_S", 0)
+        task = asyncio.create_task(manager.listen(callback))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+        assert pubsub.subscribe.await_count == 2
+        assert received == ["hello"]

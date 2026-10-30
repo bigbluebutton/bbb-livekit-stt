@@ -6,6 +6,9 @@ import redis.asyncio as redis
 from config import RedisConfig
 from livekit.agents.stt import SpeechData
 
+# Pause before the listener tries again after a Redis error.
+_LISTEN_RETRY_S = 1.0
+
 
 class RedisManager:
     UPDATE_TRANSCRIPT_PUB_MSG = "UpdateTranscriptPubMsg"
@@ -85,11 +88,19 @@ class RedisManager:
             return
 
         async with self.sub_client.pubsub() as pubsub:
-            await pubsub.subscribe(self.FROM_AKKA_APPS_CHANNEL)
-            logging.info(f"Subscribed to Redis channel: {self.FROM_AKKA_APPS_CHANNEL}")
+            subscribed = False
 
             while True:
                 try:
+                    # Inside the loop: a subscribe that fails once would
+                    # otherwise end the listener for the rest of the job.
+                    if not subscribed:
+                        await pubsub.subscribe(self.FROM_AKKA_APPS_CHANNEL)
+                        subscribed = True
+                        logging.info(
+                            f"Subscribed to Redis channel: {self.FROM_AKKA_APPS_CHANNEL}"
+                        )
+
                     message = await pubsub.get_message(
                         ignore_subscribe_messages=True, timeout=1.0
                     )
@@ -101,7 +112,7 @@ class RedisManager:
                     break
                 except Exception as e:
                     logging.error(f"Error in Redis command listener: {e}")
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(_LISTEN_RETRY_S)
 
     async def aclose(self):
         if self.pub_client:

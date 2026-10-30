@@ -127,7 +127,8 @@ session is running is read from `processing_info`, never from the stored locale.
 LiveKit awaits a job's shutdown callbacks, not its entrypoint: the job process exits
 as soon as they return, wherever `start()` got to. So `main.py` registers one that
 calls `BaseSttAgent.shutdown()`, which returns once `start()` has torn the agent
-down, and then closes Redis. Once shutdown begins, no session starts.
+down, and then closes Redis. Once shutdown begins, neither a session nor the Redis
+listener starts.
 
 `_cleanup()` stops every session, waits for every pipeline still running and every
 stream close the stop path started, then gives transcript handlers up to 5 s. A

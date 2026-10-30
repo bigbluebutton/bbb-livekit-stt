@@ -310,7 +310,7 @@ async def entrypoint(ctx: JobContext):
                 translation_enabled=agent.translation_enabled,
             )
 
-    redis_listen_task = asyncio.create_task(redis_manager.listen(on_redis_message))
+    redis_listen_task: asyncio.Task | None = None
     redis_closing: asyncio.Future | None = None
 
     async def close_redis():
@@ -322,11 +322,14 @@ async def entrypoint(ctx: JobContext):
         await asyncio.shield(redis_closing)
 
     async def _close_redis():
-        redis_listen_task.cancel()
-        try:
-            await redis_listen_task
-        except asyncio.CancelledError:
-            pass
+        if redis_listen_task is not None:
+            redis_listen_task.cancel()
+            try:
+                await redis_listen_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logging.error(f"Redis listener failed: {e}")
         await redis_manager.aclose()
 
     async def on_job_shutdown():
@@ -337,12 +340,20 @@ async def entrypoint(ctx: JobContext):
     ctx.add_shutdown_callback(on_job_shutdown)
 
     try:
-        if not await redis_manager.connect():
-            # Not fatal: the agent still joins and transcribes. But every
-            # transcript will be published nowhere, so it must be observable.
-            stt_metrics.agent_start_failed(
-                agent.provider_name, AGENT_FAILURE_REDIS_CONNECT
-            )
+        connected = await redis_manager.connect()
+        # If a shutdown closed Redis during the connect, start no listener and
+        # record no failure, since the shutdown ended the connect.
+        if redis_closing is None:
+            if connected:
+                redis_listen_task = asyncio.create_task(
+                    redis_manager.listen(on_redis_message)
+                )
+            else:
+                # Not fatal: the agent still joins the room. But no locale change
+                # arrives and no transcript is published, so record the failure.
+                stt_metrics.agent_start_failed(
+                    agent.provider_name, AGENT_FAILURE_REDIS_CONNECT
+                )
 
         logging.info(f"Received job for room {ctx.room.name}")
         await agent.start(ctx)
