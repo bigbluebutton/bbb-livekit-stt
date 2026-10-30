@@ -182,6 +182,49 @@ class BaseSttAgent(EventEmitter, ABC):
             f"Started transcription for {participant.identity} with locale {locale}."
         )
 
+    def handle_speech_locale_change(
+        self, user_id: str, locale: str | None, provider: str | None
+    ):
+        """Apply a BBB speech-locale change to a participant's session.
+
+        Only a complete pair means "transcribe": the html5 client clears both
+        fields when a user unassigns their language, while other producers
+        (a plugin pausing transcription) clear the locale and leave the provider
+        filled, and akka passes either through verbatim. So anything short of
+        both means "turn it off"; everything else is a request for transcription
+        in `locale` — adjust the session in place when one is running, start one
+        otherwise.
+        """
+        if not (locale and provider):
+            self.disable_transcription_for_user(user_id)
+            return
+
+        if user_id not in self.processing_info:
+            # Nothing to adjust: transcription is off, or its audio track went
+            # away. start_transcription_for_user() records the settings either
+            # way, so the session starts now or when the track is published.
+            self.start_transcription_for_user(user_id, locale, provider)
+            return
+
+        if self.participant_settings.get(user_id, {}).get("locale") != locale:
+            self.update_locale_for_user(user_id, locale)
+
+    def disable_transcription_for_user(self, user_id: str):
+        """Stop transcription and forget the locale BBB assigned to the user.
+
+        Unlike stopping a session, this drops the locale: _on_track_subscribed
+        restarts from the settings, so a locale left behind resurrects
+        transcription as soon as the microphone is republished. Speech options
+        stay: they arrive on their own event and are not resent when the locale
+        is reassigned or the user reconnects.
+        """
+        self.stop_transcription_for_user(user_id)
+
+        settings = self.participant_settings.get(user_id)
+        if settings is not None:
+            settings.pop("locale", None)
+            settings.pop("provider", None)
+
     def stop_transcription_for_user(self, user_id: str):
         logging.debug(f"Stopping transcription for {user_id}.")
 
@@ -190,15 +233,6 @@ class BaseSttAgent(EventEmitter, ABC):
             info["task"].cancel()
             self.metrics.session_stopped(self.provider_name, info["metrics_locale"])
             logging.info(f"Stopped transcription for user {user_id}.")
-
-    def disable_transcription_for_user(self, user_id: str):
-        """Stop transcription and forget the user's locale, so a reconnect does not
-        start it again. Speech options stay: the client sends them when it mounts and
-        when the user changes them, not on a reconnect."""
-        self.stop_transcription_for_user(user_id)
-        settings = self.participant_settings.get(user_id, {})
-        settings.pop("locale", None)
-        settings.pop("provider", None)
 
     def update_locale_for_user(self, user_id: str, locale: str):
         if user_id in self.participant_settings:
