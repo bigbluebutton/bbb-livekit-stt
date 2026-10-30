@@ -14,6 +14,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 * feat: instrument session lifecycle across the STT providers
 * feat: instrument transcript publication and discards
 * feat: count transcription session ends by reason
+* feat: drop the gauges of job processes that have exited
 * refactor: extract BaseSttAgent and BaseSttConfig into providers/base.py
 * refactor: move GladiaConfig to providers package, delete old agent module
 * fix: keep a user's speech locale when they reconnect

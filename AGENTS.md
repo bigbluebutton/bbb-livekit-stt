@@ -230,7 +230,8 @@ until they pass. Do not add tests for input shapes the callers cannot produce.
   `PROMETHEUS_MULTIPROC_DIR` must be set as a real env var — `prometheus_client`
   picks its value class at import time, long before `WorkerOptions` could set it.
   Passing `prometheus_multiproc_dir` to `WorkerOptions` instead silently drops the
-  worker's own metrics.
+  worker's own metrics. A killed job's gauges stay until the worker's
+  `sweep_dead_processes()` drops them.
 - **Metrics tests need a fresh registry.** Construct `SttMetrics(CollectorRegistry())`
   per test and read values with `registry.get_sample_value(name, labels)`. Reusing
   the default registry makes tests order-dependent.

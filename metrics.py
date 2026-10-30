@@ -5,15 +5,22 @@ the LiveKit worker's built-in ``/metrics`` endpoint serves alongside its own
 ``lk_agents_*`` metrics. Set ``BBB_STT_PROMETHEUS_PORT`` to expose it.
 
 Jobs run in child processes, so every ``Gauge`` declares an explicit
-``multiprocess_mode``. ``livesum`` matches LiveKit's own choice for its active-job
-gauge: values sum across processes and a dead process stops contributing.
+``multiprocess_mode``: ``livesum`` sums values across processes. A dead process
+stops contributing only once sweep_dead_processes() drops its gauges.
 ``PROMETHEUS_MULTIPROC_DIR`` comes from the environment, not ``WorkerOptions``:
 ``prometheus_client`` reads it on first import, before ``WorkerOptions`` is built.
 
 This module must not import from ``providers`` — providers import it.
 """
 
+import glob
+import logging
+import os
+import threading
+import time
+
 from prometheus_client import REGISTRY, CollectorRegistry, Counter, Gauge, Histogram
+from prometheus_client import multiprocess
 
 # --- Label values. Closed sets: never caller-supplied strings. ---
 
@@ -272,3 +279,58 @@ class SttMetrics:
 
 
 stt_metrics = SttMetrics()
+
+
+# How often the worker drops the gauges of exited job processes.
+DEAD_PROCESS_SWEEP_S = 60.0
+
+
+def _process_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def sweep_dead_processes(directory: str) -> list[int]:
+    """Drop the livesum gauges of job processes that no longer exist.
+
+    Nothing else does: LiveKit never calls mark_process_dead(), so a killed
+    job would stay counted as an active agent and session. Counter and
+    histogram files stay: merging them would race a scrape and could lower a
+    float counter, which Prometheus reads as a reset.
+    """
+    dead = set()
+    for path in glob.glob(os.path.join(directory, "gauge_live*_*.db")):
+        pid = os.path.basename(path)[: -len(".db")].rsplit("_", 1)[-1]
+        if pid.isdigit() and int(pid) != os.getpid() and not _process_exists(int(pid)):
+            dead.add(int(pid))
+
+    # mark_process_dead() removes those files, so a pid is reported only once.
+    for pid in sorted(dead):
+        multiprocess.mark_process_dead(pid, directory)
+
+    return sorted(dead)
+
+
+def start_dead_process_sweeper(
+    directory: str, interval: float = DEAD_PROCESS_SWEEP_S
+) -> threading.Thread:
+    """Run sweep_dead_processes() every `interval` seconds, in the worker process."""
+
+    def sweep_forever():
+        while True:
+            time.sleep(interval)
+            try:
+                sweep_dead_processes(directory)
+            except Exception:
+                logging.exception("Could not sweep dead job processes' gauges.")
+
+    thread = threading.Thread(
+        target=sweep_forever, name="bbb-stt-metrics-sweeper", daemon=True
+    )
+    thread.start()
+    return thread

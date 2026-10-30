@@ -171,13 +171,13 @@ Caveats worth knowing:
 - **`bbb_stt_provider_audio_seconds_total` undercounts.** The Gladia plugin
   reports audio every 5 s or so. Audio sent after the last report can be lost
   when a session ends: under 5 s normally, more after a slow Gladia connection.
-- **A job killed with `SIGKILL` leaves its gauge value behind.** `prometheus_client`
-  drops a dead process's gauge contribution only when `mark_process_dead` is
-  called, and `livekit-agents` never calls it. Clean exits, exceptions and
-  cancellations decrement correctly; an OOM kill does not. The stale value
-  clears when the worker restarts. LiveKit's own `lk_agents_active_job_count` is
-  affected identically, so `bbb_stt_active_agents` exceeding it indicates leaked
-  series.
+- **A killed job keeps counting for up to a minute.** The kernel kills a job for
+  memory, and LiveKit for missed pings or an overrun shutdown. The worker drops
+  the gauges of exited processes every 60 s. The sessions such a job was running
+  get no `bbb_stt_session_ends_total` sample.
+- **The multiprocess directory grows with every job.** Each job leaves a counter
+  and a histogram file there until the worker restarts, so scrapes slow down over
+  a long-running worker's life.
 - **A locale change restarts the participant's session.** It appears as a stop
   and a start: `bbb_stt_session_starts_total` advances and the session gauge moves
   between language labels.

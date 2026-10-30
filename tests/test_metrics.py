@@ -1,4 +1,10 @@
+import os
+import subprocess
+import sys
+
 from prometheus_client import CollectorRegistry, Gauge
+from prometheus_client.mmap_dict import MmapedDict, mmap_key
+from prometheus_client.multiprocess import MultiProcessCollector
 
 from metrics import (
     AGENT_FAILURE_ROOM_CONNECT,
@@ -10,6 +16,7 @@ from metrics import (
     SESSION_FAILURE_PARTICIPANT_NOT_FOUND,
     SttMetrics,
     language_label,
+    sweep_dead_processes,
 )
 
 
@@ -50,14 +57,14 @@ class TestCollectorRegistration:
 
 class TestMultiprocessSafety:
     def test_every_gauge_declares_a_multiprocess_mode(self):
-        """Jobs run in child processes; a gauge without a mode raises at
-        collection time in multiprocess mode, which unit tests never exercise."""
+        """A gauge without a mode defaults to "all", which exposes one series per
+        job process instead of their sum."""
         metrics = _make_metrics()
         gauges = [value for value in vars(metrics).values() if isinstance(value, Gauge)]
         assert gauges, "expected SttMetrics to expose at least one Gauge"
         for gauge in gauges:
             assert gauge._multiprocess_mode == "livesum", (
-                f"{gauge._name} must use livesum so a dead job's contribution drops out"
+                f"{gauge._name} must use livesum so the job processes' values sum"
             )
 
 
@@ -431,6 +438,88 @@ class TestSessionEnded:
             registry.get_sample_value(
                 "bbb_stt_session_ends_total",
                 {"provider": "gladia", "reason": SESSION_END_STOPPED},
+            )
+            == 1.0
+        )
+
+
+def _exited_pid():
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()
+    return child.pid
+
+
+def _write(path, metric, sample, labels, value):
+    values = MmapedDict(str(path))
+    key = mmap_key(metric, sample, list(labels), list(labels.values()), "help")
+    values.write_value(key, value, 0.0)
+    values.close()
+
+
+def _collect(directory):
+    registry = CollectorRegistry()
+    MultiProcessCollector(registry, path=str(directory))
+    return registry
+
+
+class TestSweepDeadProcesses:
+    def _job_files(self, directory, pid, sessions=1.0, starts=1.0):
+        labels = {"provider": "gladia"}
+        _write(
+            directory / f"gauge_livesum_{pid}.db",
+            "bbb_stt_active_agents",
+            "bbb_stt_active_agents",
+            labels,
+            sessions,
+        )
+        _write(
+            directory / f"counter_{pid}.db",
+            "bbb_stt_session_starts",
+            "bbb_stt_session_starts_total",
+            labels,
+            starts,
+        )
+
+    def test_a_dead_jobs_gauge_stops_counting(self, tmp_path):
+        self._job_files(tmp_path, _exited_pid())
+
+        sweep_dead_processes(str(tmp_path))
+
+        assert (
+            _collect(tmp_path).get_sample_value(
+                "bbb_stt_active_agents", {"provider": "gladia"}
+            )
+            is None
+        )
+
+    def test_a_dead_jobs_counters_are_left_in_place(self, tmp_path):
+        pid = _exited_pid()
+        self._job_files(tmp_path, pid, starts=2.0)
+
+        sweep_dead_processes(str(tmp_path))
+
+        assert (
+            _collect(tmp_path).get_sample_value(
+                "bbb_stt_session_starts_total", {"provider": "gladia"}
+            )
+            == 2.0
+        )
+        assert sorted(os.listdir(tmp_path)) == [f"counter_{pid}.db"]
+
+    def test_a_swept_pid_is_not_reported_again(self, tmp_path):
+        pid = _exited_pid()
+        self._job_files(tmp_path, pid)
+
+        assert sweep_dead_processes(str(tmp_path)) == [pid]
+        assert sweep_dead_processes(str(tmp_path)) == []
+
+    def test_a_live_process_is_left_alone(self, tmp_path):
+        self._job_files(tmp_path, os.getpid())
+
+        assert sweep_dead_processes(str(tmp_path)) == []
+        assert (
+            _collect(tmp_path).get_sample_value(
+                "bbb_stt_active_agents", {"provider": "gladia"}
             )
             == 1.0
         )

@@ -18,6 +18,7 @@ from metrics import (
     DISCARD_UNRESOLVABLE_LOCALE,
     EVENT_TYPE_FINAL,
     EVENT_TYPE_INTERIM,
+    start_dead_process_sweeper,
     stt_metrics,
 )
 from config import (
@@ -364,10 +365,15 @@ def _metrics_worker_kwargs() -> dict:
 
 
 if __name__ == "__main__":
+    metrics_kwargs = _metrics_worker_kwargs()
+    multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+    if metrics_kwargs and multiproc_dir:
+        start_dead_process_sweeper(multiproc_dir)
+
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
             prewarm_fnc=prewarm,
-            **_metrics_worker_kwargs(),
+            **metrics_kwargs,
         )
     )
