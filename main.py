@@ -1,3 +1,5 @@
+import load_env  # noqa: F401 - must stay first; see load_env.py
+
 import asyncio
 import json
 import logging
@@ -5,7 +7,6 @@ import math
 import os
 
 import nest_asyncio
-from dotenv import load_dotenv
 from livekit.agents import JobContext, JobProcess, WorkerOptions, cli, stt
 from livekit import rtc
 
@@ -32,8 +33,6 @@ from utils import (
     coerce_partial_utterances,
     resolve_bbb_locale,
 )
-
-load_dotenv()
 
 
 def _log_startup_configuration(stt_config):

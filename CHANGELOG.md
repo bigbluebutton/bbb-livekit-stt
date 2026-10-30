@@ -35,6 +35,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 * fix: count transcript discards by event type
 * fix: label the session gauge with a bounded language
 * fix: keep a Redis outage at job start from ending the job with an error
+* fix: load .env before anything reads the environment
 * build(docker): add LOG_LEVEL env var to control the container's log level
 * build: declare aiohttp and numpy as direct dependencies
 * build: count main.py in coverage

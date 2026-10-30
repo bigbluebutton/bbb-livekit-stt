@@ -1,4 +1,8 @@
 import asyncio
+import os
+import shutil
+import subprocess
+import sys
 import json
 import math
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -471,3 +475,45 @@ class TestRedisDownAtJobStart:
             await asyncio.wait_for(task, timeout=5)
 
         aclose.assert_awaited_once()
+
+
+class TestDotenvIsLoadedFirst:
+    def test_settings_in_dotenv_reach_the_config(self, tmp_path):
+        """load_env.py says why .env must load before config and
+        prometheus_client. Without that, a port set only in .env would be
+        silently ignored."""
+        root = os.path.dirname(os.path.abspath(main.__file__))
+        for name in os.listdir(root):
+            if name.endswith(".py"):
+                shutil.copy(os.path.join(root, name), tmp_path)
+        shutil.copytree(os.path.join(root, "providers"), tmp_path / "providers")
+        (tmp_path / ".env").write_text(
+            "BBB_STT_PROMETHEUS_PORT=9464\n"
+            f"PROMETHEUS_MULTIPROC_DIR={tmp_path}\n"
+            "REDIS_PORT=6390\n"
+        )
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("BBB_STT_PROMETHEUS_PORT", "PROMETHEUS_MULTIPROC_DIR")
+            and not k.startswith("REDIS_")
+        }
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import main\n"
+                "from prometheus_client import values\n"
+                "print(main.metrics_config.prometheus_port, main.redis_config.port,"
+                " values.ValueClass.__name__)",
+            ],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.split() == ["9464", "6390", "MmapedValue"]

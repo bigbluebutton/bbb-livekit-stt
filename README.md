@@ -125,11 +125,10 @@ PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus-multiproc
 
 Scrape `http://<host>:8082/metrics`.
 
-`PROMETHEUS_MULTIPROC_DIR` is required, not optional. LiveKit runs each room job
-in its own process, and per-session metrics only reach the endpoint through this
-shared directory. It must be a real environment variable: `prometheus_client`
-decides whether to use multiprocess mode when it is first imported, which happens
-before the worker could set it. The Docker image sets it already.
+`PROMETHEUS_MULTIPROC_DIR` is required. LiveKit runs each room job in its own
+process, and every `bbb_stt_*` metric reaches the endpoint only through this
+shared directory. Set it in the environment or in `.env`; the Docker image sets
+it whenever the port is set.
 
 With Docker:
 

@@ -77,6 +77,8 @@ dependencies, run the agent, and run tests.
 - **`redis_manager.py`** — async Redis pub/sub. Publishes `UpdateTranscriptPubMsg`
   to `to-akka-apps-redis-channel`; listens on `from-akka-apps-redis-channel` for
   locale and speech-option change events and `UserLeftMeetingEvtMsg`.
+- **`load_env.py`** — loads `.env`; `main.py` imports it first, before anything
+  reads the environment.
 - **`events.py`** — minimal async `EventEmitter`, the base of `BaseSttAgent`.
 - **`utils.py`** — `resolve_bbb_locale()` plus coercion helpers for values arriving
   over Redis (`coerce_partial_utterances`, `coerce_min_utterance_length_seconds`).
@@ -226,13 +228,13 @@ until they pass. Do not add tests for input shapes the callers cannot produce.
   `GladiaConfig(api_key="fake-key")`).
   `VoxtralRealtimeConfig` additionally needs a `base_url` — the agent's constructor
   raises `ValueError` without one.
-- **Metrics run across processes.** LiveKit runs each job in its own process, so
-  every `Gauge` in `metrics.py` declares `multiprocess_mode="livesum"`, and
-  `PROMETHEUS_MULTIPROC_DIR` must be set as a real env var — `prometheus_client`
-  picks its value class at import time, long before `WorkerOptions` could set it.
-  Passing `prometheus_multiproc_dir` to `WorkerOptions` instead silently drops the
-  worker's own metrics. A killed job's gauges stay until the worker's
-  `sweep_dead_processes()` drops them.
+- **Metrics run across processes**: LiveKit runs each job in its own process, so
+  every `Gauge` in `metrics.py` declares `multiprocess_mode="livesum"`. A killed
+  job's gauges stay until the worker's `sweep_dead_processes()` drops them.
+  `PROMETHEUS_MULTIPROC_DIR` must come from the environment or `.env`:
+  `prometheus_client` picks its value class at import, before `WorkerOptions` could
+  set it. Passing `prometheus_multiproc_dir` to `WorkerOptions` instead silently
+  drops the worker's own metrics.
 - **Metrics tests need a fresh registry.** Construct `SttMetrics(CollectorRegistry())`
   per test and read values with `registry.get_sample_value(name, labels)`. Reusing
   the default registry makes tests order-dependent.
