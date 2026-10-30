@@ -11,7 +11,13 @@ from livekit import rtc
 from livekit.agents import stt
 
 from livekit.agents import vad as agents_vad
+from prometheus_client import CollectorRegistry
 
+from metrics import (
+    SESSION_FAILURE_NO_AUDIO_TRACK,
+    SESSION_FAILURE_PARTICIPANT_NOT_FOUND,
+    SttMetrics,
+)
 from providers.voxtral_realtime import (
     VoxtralRealtimeConfig,
     VoxtralRealtimeSttAgent,
@@ -1885,4 +1891,77 @@ class TestTeardownFlush:
         assert texts == ["tail words"], (
             f"the tail segment's late transcription.done must still be read "
             f"before teardown, got {texts}"
+        )
+
+
+def _make_metered_agent(participants=None):
+    registry = CollectorRegistry()
+    agent = VoxtralRealtimeSttAgent(
+        _make_config(), vad=_make_mock_vad(), metrics=SttMetrics(registry)
+    )
+    agent.room = MagicMock()
+    agent.room.remote_participants = participants or {}
+    return agent, registry
+
+
+class TestVoxtralSessionMetrics:
+    def test_provider_name(self):
+        agent, _ = _make_metered_agent()
+        assert agent.provider_name == "voxtral-realtime"
+
+    def test_records_participant_not_found(self):
+        agent, registry = _make_metered_agent()
+
+        agent.start_transcription_for_user("ghost", "en-US", "voxtral-realtime")
+
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_session_start_failures_total",
+                {
+                    "provider": "voxtral-realtime",
+                    "reason": SESSION_FAILURE_PARTICIPANT_NOT_FOUND,
+                },
+            )
+            == 1.0
+        )
+
+    def test_records_no_audio_track(self):
+        participant = _make_participant("user_1", has_audio_track=False)
+        agent, registry = _make_metered_agent({"p": participant})
+
+        agent.start_transcription_for_user("user_1", "en-US", "voxtral-realtime")
+
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_session_start_failures_total",
+                {
+                    "provider": "voxtral-realtime",
+                    "reason": SESSION_FAILURE_NO_AUDIO_TRACK,
+                },
+            )
+            == 1.0
+        )
+
+    async def test_locale_change_moves_the_gauge_via_restart(self):
+        """A locale change restarts the pipeline, so the stop and start paths
+        move the gauge from en to pt."""
+        agent, registry = _make_metered_agent({"p": _make_participant("user_1")})
+
+        with patch.object(agent, "_run_transcription_pipeline", new=AsyncMock()):
+            agent.start_transcription_for_user("user_1", "en-US", "voxtral-realtime")
+            agent.update_locale_for_user("user_1", "pt-BR")
+            await asyncio.sleep(0)
+
+        labels = {"provider": "voxtral-realtime"}
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_active_sessions", {**labels, "locale": "en-US"}
+            )
+            == 0.0
+        )
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_active_sessions", {**labels, "locale": "pt-BR"}
+            )
+            == 1.0
         )

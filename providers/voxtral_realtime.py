@@ -31,6 +31,11 @@ from livekit.agents import stt
 from livekit.agents import vad as agents_vad
 from livekit.plugins import silero
 
+from metrics import (
+    SESSION_FAILURE_NO_AUDIO_TRACK,
+    SESSION_FAILURE_PARTICIPANT_NOT_FOUND,
+    SttMetrics,
+)
 from providers.base import BaseSttAgent, BaseSttConfig
 
 # Safety cap on a single streaming request's length. Only hit during pure
@@ -135,12 +140,15 @@ voxtral_realtime_config = VoxtralRealtimeConfig()
 
 
 class VoxtralRealtimeSttAgent(BaseSttAgent):
+    provider_name = "voxtral-realtime"
+
     def __init__(
         self,
         config: VoxtralRealtimeConfig,
         vad: agents_vad.VAD | None = None,
+        metrics: SttMetrics | None = None,
     ):
-        super().__init__(config)
+        super().__init__(config, metrics)
         if not config.base_url:
             # Fail at startup rather than with confusing auth/protocol errors
             # mid-meeting: Voxtral Realtime is served by a self-hosted vLLM
@@ -174,6 +182,11 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
         raise NotImplementedError("VoxtralRealtime uses a custom pipeline")
 
     def _update_stream_locale(self, user_id: str, locale: str):
+        """Restart the pipeline with the new locale.
+
+        No explicit gauge transition: stop and start already move the session
+        gauge between locale labels.
+        """
         provider = self.participant_settings.get(user_id, {}).get(
             "provider", "voxtral-realtime"
         )
@@ -190,6 +203,9 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
             logging.error(
                 f"Cannot start transcription, participant {user_id} not found."
             )
+            self.metrics.session_start_failed(
+                self.provider_name, SESSION_FAILURE_PARTICIPANT_NOT_FOUND
+            )
             return
 
         track = self._find_audio_track(participant)
@@ -197,19 +213,29 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
             logging.warning(
                 f"Won't start transcription yet, no audio track found for {user_id}."
             )
+            self.metrics.session_start_failed(
+                self.provider_name, SESSION_FAILURE_NO_AUDIO_TRACK
+            )
             return
 
         if participant.identity in self.processing_info:
             logging.debug(
                 f"Transcription already running for {participant.identity}, ignoring."
             )
+            # A no-op, not a failure: nothing to record.
             return
 
         language = self._sanitize_locale(locale)
         task = asyncio.create_task(
             self._run_transcription_pipeline(participant, track, language)
         )
-        self.processing_info[participant.identity] = {"task": task}
+        self.processing_info[participant.identity] = {
+            "task": task,
+            # See BaseSttAgent.start_transcription_for_user for why this is kept
+            # separate from participant_settings.
+            "metrics_locale": locale,
+        }
+        self.metrics.session_started(self.provider_name, locale)
         logging.info(
             f"Started Voxtral Realtime transcription for {participant.identity} ({locale})."
         )
