@@ -84,3 +84,58 @@ class TestEventEmitter:
 
         assert a_calls == [True]
         assert b_calls == []
+
+    async def test_drain_waits_for_handlers_still_running(self):
+        """Redis closes after teardown, so drain() must wait for a transcript
+        still being published."""
+        emitter = EventEmitter()
+        release = asyncio.Event()
+        done = []
+
+        @emitter.on("final_transcript")
+        async def on_final(**kwargs):
+            await release.wait()
+            done.append(True)
+
+        emitter.emit("final_transcript")
+        drained = asyncio.create_task(emitter.drain())
+        await asyncio.sleep(0)
+        assert not drained.done()
+
+        release.set()
+        await asyncio.wait_for(drained, timeout=1)
+        assert done == [True]
+
+    async def test_drain_gives_up_after_its_timeout_without_cancelling(self):
+        """A hung publish must not keep the job's teardown running past
+        LiveKit's shutdown timeout."""
+        emitter = EventEmitter()
+        hang = asyncio.Event()
+
+        @emitter.on("final_transcript")
+        async def on_final(**kwargs):
+            await hang.wait()
+
+        emitter.emit("final_transcript")
+        await asyncio.sleep(0)
+        await asyncio.wait_for(emitter.drain(timeout=0.05), timeout=1)
+
+        (task,) = emitter._handling
+        assert not task.done()
+        hang.set()
+        await task
+
+    async def test_a_failing_handler_is_logged_even_when_drained(self, caplog):
+        emitter = EventEmitter()
+
+        @emitter.on("final_transcript")
+        async def on_final(**kwargs):
+            raise RuntimeError("publish failed")
+
+        emitter.emit("final_transcript")
+        await emitter.drain()
+
+        assert any(
+            r.levelname == "ERROR" and "publish failed" in str(r.exc_info)
+            for r in caplog.records
+        )

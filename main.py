@@ -1,23 +1,38 @@
+import load_env  # noqa: F401 - must stay first; see load_env.py
+
 import asyncio
 import json
 import logging
 import math
+import os
 
 import nest_asyncio
-from dotenv import load_dotenv
 from livekit.agents import JobContext, JobProcess, WorkerOptions, cli, stt
 from livekit import rtc
 
 from redis_manager import RedisManager
 from providers import create_agent, prewarm_provider
-from config import get_redacted_app_config, redis_config, stt_provider
+from metrics import (
+    AGENT_FAILURE_REDIS_CONNECT,
+    AGENT_FAILURE_UNKNOWN_PROVIDER,
+    DISCARD_BELOW_MIN_UTTERANCE_LENGTH,
+    DISCARD_UNRESOLVABLE_LOCALE,
+    EVENT_TYPE_FINAL,
+    EVENT_TYPE_INTERIM,
+    start_dead_process_sweeper,
+    stt_metrics,
+)
+from config import (
+    get_redacted_app_config,
+    metrics_config,
+    redis_config,
+    stt_provider,
+)
 from utils import (
     coerce_min_utterance_length_seconds,
     coerce_partial_utterances,
     resolve_bbb_locale,
 )
-
-load_dotenv()
 
 
 def _log_startup_configuration(stt_config):
@@ -37,7 +52,12 @@ async def entrypoint(ctx: JobContext):
     nest_asyncio.apply()
 
     redis_manager = RedisManager(redis_config)
-    agent = create_agent(stt_provider, ctx.proc.userdata)
+
+    try:
+        agent = create_agent(stt_provider, ctx.proc.userdata)
+    except ValueError:
+        stt_metrics.agent_start_failed(stt_provider, AGENT_FAILURE_UNKNOWN_PROVIDER)
+        raise
 
     _log_startup_configuration(agent.config)
 
@@ -64,19 +84,9 @@ async def entrypoint(ctx: JobContext):
                 return
 
             if event_name == RedisManager.USER_SPEECH_LOCALE_CHANGED_EVT_MSG:
-                locale = body.get("locale")
-                provider = body.get("provider")
-
-                if not (provider and locale):
-                    agent.disable_transcription_for_user(user_id)
-                else:
-                    current_locale = agent.participant_settings.get(user_id, {}).get(
-                        "locale"
-                    )
-                    if current_locale and current_locale != locale:
-                        agent.update_locale_for_user(user_id, locale)
-                    elif not current_locale:
-                        agent.start_transcription_for_user(user_id, locale, provider)
+                agent.handle_speech_locale_change(
+                    user_id, body.get("locale"), body.get("provider")
+                )
 
             elif event_name == RedisManager.USER_SPEECH_OPTIONS_CHANGED_EVT_MSG:
                 partial_utterances = coerce_partial_utterances(
@@ -102,16 +112,12 @@ async def entrypoint(ctx: JobContext):
     async def on_final_transcript(
         participant: rtc.RemoteParticipant,
         event: stt.SpeechEvent,
-        open_time: float = agent.open_time,
+        open_time: float,
+        locale: str,
     ):
-        p_settings = agent.participant_settings.get(participant.identity, {})
-        original_locale = p_settings.get("locale")
-
-        if not original_locale:
-            logging.warning(
-                f"Could not find original locale for participant {participant.identity}, cannot process transcripts."
-            )
-            return
+        # The locale comes with the transcript, as open_time does: the
+        # participant may have switched locale since this audio was transcribed.
+        original_locale = locale
 
         # "auto" means the provider detects the language, so there is no
         # selected language to fall back to when a transcript omits one.
@@ -153,9 +159,12 @@ async def entrypoint(ctx: JobContext):
                     f"locale is '{original_locale}', so there is no BBB locale "
                     f"to publish it under."
                 )
+                stt_metrics.transcript_discarded(
+                    agent.provider_name, EVENT_TYPE_FINAL, DISCARD_UNRESOLVABLE_LOCALE
+                )
                 continue
 
-            await redis_manager.publish_update_transcript_pub_msg(
+            published = await redis_manager.publish_update_transcript_pub_msg(
                 agent.room.name,
                 participant.identity,
                 alternative,
@@ -165,24 +174,41 @@ async def entrypoint(ctx: JobContext):
                 result=True,
             )
 
+            # Recorded after the publish, so a metrics error cannot drop the
+            # transcript.
+            if not published:
+                stt_metrics.transcript_publish_failed(agent.provider_name)
+
+            stt_metrics.transcript_emitted(
+                agent.provider_name,
+                EVENT_TYPE_FINAL,
+                confidence=(
+                    alternative.confidence if agent.reports_confidence else None
+                ),
+                duration_seconds=utterance_duration_seconds,
+            )
+            stt_metrics.language_checked(
+                agent.provider_name,
+                requested_lang=original_lang,
+                reported_lang=alternative.language,
+                translation_enabled=agent.translation_enabled,
+            )
+
     @agent.on("interim_transcript")
     async def on_interim_transcript(
         participant: rtc.RemoteParticipant,
         event: stt.SpeechEvent,
-        open_time: float = agent.open_time,
+        open_time: float,
+        locale: str,
     ):
+        # Speech options are read live: the participant can change them at any
+        # time.
         p_settings = agent.participant_settings.get(participant.identity, {})
 
         if not p_settings.get("partial_utterances", False):
             return
 
-        original_locale = p_settings.get("locale")
-
-        if not original_locale:
-            logging.warning(
-                f"Could not find original locale for participant {participant.identity}, cannot process interim transcripts."
-            )
-            return
+        original_locale = locale
 
         original_lang = (
             None if original_locale.lower() == "auto" else original_locale.split("-")[0]
@@ -216,6 +242,11 @@ async def entrypoint(ctx: JobContext):
                         "end_time_adjusted": end_time_adjusted,
                     },
                 )
+                stt_metrics.transcript_discarded(
+                    agent.provider_name,
+                    EVENT_TYPE_INTERIM,
+                    DISCARD_BELOW_MIN_UTTERANCE_LENGTH,
+                )
                 continue
 
             logging.debug(
@@ -244,9 +275,12 @@ async def entrypoint(ctx: JobContext):
                     f"locale is '{original_locale}', so there is no BBB locale "
                     f"to publish it under."
                 )
+                stt_metrics.transcript_discarded(
+                    agent.provider_name, EVENT_TYPE_INTERIM, DISCARD_UNRESOLVABLE_LOCALE
+                )
                 continue
 
-            await redis_manager.publish_update_transcript_pub_msg(
+            published = await redis_manager.publish_update_transcript_pub_msg(
                 agent.room.name,
                 participant.identity,
                 alternative,
@@ -256,21 +290,100 @@ async def entrypoint(ctx: JobContext):
                 result=False,
             )
 
-    redis_listen_task = asyncio.create_task(redis_manager.listen(on_redis_message))
+            # After the publish, as in on_final_transcript.
+            if not published:
+                stt_metrics.transcript_publish_failed(agent.provider_name)
+
+            stt_metrics.transcript_emitted(
+                agent.provider_name,
+                EVENT_TYPE_INTERIM,
+                confidence=(
+                    alternative.confidence if agent.reports_confidence else None
+                ),
+                duration_seconds=utterance_duration_seconds,
+            )
+            stt_metrics.language_checked(
+                agent.provider_name,
+                requested_lang=original_lang,
+                reported_lang=alternative.language,
+                translation_enabled=agent.translation_enabled,
+            )
+
+    redis_listen_task: asyncio.Task | None = None
+    redis_closing: asyncio.Future | None = None
+
+    async def close_redis():
+        # Every caller awaits the same close: the entrypoint's finally can get
+        # here first, and LiveKit's shutdown callback must still wait for it.
+        nonlocal redis_closing
+        if redis_closing is None:
+            redis_closing = asyncio.ensure_future(_close_redis())
+        await asyncio.shield(redis_closing)
+
+    async def _close_redis():
+        if redis_listen_task is not None:
+            redis_listen_task.cancel()
+            try:
+                await redis_listen_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logging.error(f"Redis listener failed: {e}")
+        await redis_manager.aclose()
+
+    async def on_job_shutdown():
+        # LiveKit waits for this teardown; see BaseSttAgent.shutdown().
+        await agent.shutdown()
+        await close_redis()
+
+    ctx.add_shutdown_callback(on_job_shutdown)
 
     try:
-        await redis_manager.connect()
+        connected = await redis_manager.connect()
+        # If a shutdown closed Redis during the connect, start no listener and
+        # record no failure, since the shutdown ended the connect.
+        if redis_closing is None:
+            if connected:
+                redis_listen_task = asyncio.create_task(
+                    redis_manager.listen(on_redis_message)
+                )
+            else:
+                # Not fatal: the agent still joins the room. But no locale change
+                # arrives and no transcript is published, so record the failure.
+                stt_metrics.agent_start_failed(
+                    agent.provider_name, AGENT_FAILURE_REDIS_CONNECT
+                )
+
         logging.info(f"Received job for room {ctx.room.name}")
         await agent.start(ctx)
     finally:
-        redis_listen_task.cancel()
-        try:
-            await redis_listen_task
-        except asyncio.CancelledError:
-            pass
-        await redis_manager.aclose()
+        await close_redis()
+
+
+def _metrics_worker_kwargs() -> dict:
+    if metrics_config.prometheus_port is None:
+        return {}
+
+    if not os.environ.get("PROMETHEUS_MULTIPROC_DIR"):
+        logging.warning(
+            "BBB_STT_PROMETHEUS_PORT is set without PROMETHEUS_MULTIPROC_DIR: "
+            "/metrics will serve no bbb_stt_* metric, since jobs record them "
+            "in their own processes."
+        )
+
+    return {"prometheus_port": metrics_config.prometheus_port}
 
 
 if __name__ == "__main__":
-    opts = WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm)
-    cli.run_app(opts)
+    metrics_kwargs = _metrics_worker_kwargs()
+    multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+    if metrics_kwargs and multiproc_dir:
+        start_dead_process_sweeper(multiproc_dir)
+
+    cli.run_app(
+        WorkerOptions(
+            entrypoint_fnc=entrypoint,
+            prewarm_fnc=prewarm,
+            **metrics_kwargs,
+        )
+    )

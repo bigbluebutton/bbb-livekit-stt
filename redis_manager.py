@@ -6,6 +6,9 @@ import redis.asyncio as redis
 from config import RedisConfig
 from livekit.agents.stt import SpeechData
 
+# Pause before the listener tries again after a Redis error.
+_LISTEN_RETRY_S = 1.0
+
 
 class RedisManager:
     UPDATE_TRANSCRIPT_PUB_MSG = "UpdateTranscriptPubMsg"
@@ -22,7 +25,11 @@ class RedisManager:
         self.pub_client = None
         self.sub_client = None
 
-    async def connect(self):
+    async def connect(self) -> bool:
+        """Connect the pub and sub clients. Returns False on failure.
+
+        Failure is not raised, so the caller can record it and carry on.
+        """
         try:
             logging.debug(f"Connecting to Redis at {self.host}:{self.port}")
             self.pub_client = redis.Redis(
@@ -34,10 +41,12 @@ class RedisManager:
             await self.pub_client.ping()
             await self.sub_client.ping()
             logging.info("Connected to Redis")
+            return True
         except Exception as e:
             logging.error(f"Failed to connect to Redis: {e}")
             self.pub_client = None
             self.sub_client = None
+            return False
 
     async def publish_update_transcript_pub_msg(
         self,
@@ -48,10 +57,10 @@ class RedisManager:
         start: int = 0,
         end: int = 0,
         result: bool = True,
-    ):
+    ) -> bool:
         if not self.pub_client:
             logging.warning("Redis not connected, skipping transcription publish")
-            return
+            return False
 
         message = self._generate_update_transcript_pub_msg(
             meeting_id,
@@ -68,8 +77,10 @@ class RedisManager:
                 self.TO_AKKA_APPS_CHANNEL, json.dumps(message)
             )
             logging.debug(f"Published to Redis: {message}")
+            return True
         except Exception as e:
             logging.error(f"Failed to publish to Redis: {e}")
+            return False
 
     async def listen(self, callback):
         if not self.sub_client:
@@ -77,11 +88,19 @@ class RedisManager:
             return
 
         async with self.sub_client.pubsub() as pubsub:
-            await pubsub.subscribe(self.FROM_AKKA_APPS_CHANNEL)
-            logging.info(f"Subscribed to Redis channel: {self.FROM_AKKA_APPS_CHANNEL}")
+            subscribed = False
 
             while True:
                 try:
+                    # Inside the loop: a subscribe that fails once would
+                    # otherwise end the listener for the rest of the job.
+                    if not subscribed:
+                        await pubsub.subscribe(self.FROM_AKKA_APPS_CHANNEL)
+                        subscribed = True
+                        logging.info(
+                            f"Subscribed to Redis channel: {self.FROM_AKKA_APPS_CHANNEL}"
+                        )
+
                     message = await pubsub.get_message(
                         ignore_subscribe_messages=True, timeout=1.0
                     )
@@ -93,7 +112,7 @@ class RedisManager:
                     break
                 except Exception as e:
                     logging.error(f"Error in Redis command listener: {e}")
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(_LISTEN_RETRY_S)
 
     async def aclose(self):
         if self.pub_client:

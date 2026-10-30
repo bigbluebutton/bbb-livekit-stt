@@ -199,6 +199,7 @@ dependencies = [
     { name = "livekit-agents", extra = ["gladia", "silero"] },
     { name = "nest-asyncio" },
     { name = "numpy" },
+    { name = "prometheus-client" },
     { name = "python-dotenv" },
     { name = "redis" },
 ]
@@ -217,6 +218,7 @@ requires-dist = [
     { name = "livekit-agents", extras = ["gladia", "silero"], specifier = "~=1.4" },
     { name = "nest-asyncio", specifier = "~=1.6.0" },
     { name = "numpy", specifier = "~=2.2" },
+    { name = "prometheus-client", specifier = "~=0.22" },
     { name = "python-dotenv", specifier = "~=1.1.1" },
     { name = "redis", specifier = "~=6.4.0" },
 ]

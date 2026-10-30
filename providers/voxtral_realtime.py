@@ -31,6 +31,13 @@ from livekit.agents import stt
 from livekit.agents import vad as agents_vad
 from livekit.plugins import silero
 
+from metrics import (
+    SESSION_END_AUDIO_ENDED,
+    SESSION_END_ERROR,
+    SESSION_FAILURE_NO_AUDIO_TRACK,
+    SESSION_FAILURE_PARTICIPANT_NOT_FOUND,
+    SttMetrics,
+)
 from providers.base import BaseSttAgent, BaseSttConfig
 
 # Safety cap on a single streaming request's length. Only hit during pure
@@ -135,12 +142,15 @@ voxtral_realtime_config = VoxtralRealtimeConfig()
 
 
 class VoxtralRealtimeSttAgent(BaseSttAgent):
+    provider_name = "voxtral-realtime"
+
     def __init__(
         self,
         config: VoxtralRealtimeConfig,
         vad: agents_vad.VAD | None = None,
+        metrics: SttMetrics | None = None,
     ):
-        super().__init__(config)
+        super().__init__(config, metrics)
         if not config.base_url:
             # Fail at startup rather than with confusing auth/protocol errors
             # mid-meeting: Voxtral Realtime is served by a self-hosted vLLM
@@ -173,14 +183,11 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
     def _create_stt_stream(self, locale: str | None) -> stt.SpeechStream:
         raise NotImplementedError("VoxtralRealtime uses a custom pipeline")
 
-    def _update_stream_locale(self, user_id: str, locale: str):
-        provider = self.participant_settings.get(user_id, {}).get(
-            "provider", "voxtral-realtime"
-        )
-        self.stop_transcription_for_user(user_id)
-        self.start_transcription_for_user(user_id, locale, provider)
-
     def start_transcription_for_user(self, user_id: str, locale: str, provider: str):
+        if self._shutdown.is_set():
+            # See BaseSttAgent.start_transcription_for_user.
+            return
+
         settings = self.participant_settings.setdefault(user_id, {})
         settings["locale"] = locale
         settings["provider"] = provider
@@ -190,6 +197,9 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
             logging.error(
                 f"Cannot start transcription, participant {user_id} not found."
             )
+            self.metrics.session_start_failed(
+                self.provider_name, SESSION_FAILURE_PARTICIPANT_NOT_FOUND
+            )
             return
 
         track = self._find_audio_track(participant)
@@ -197,19 +207,29 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
             logging.warning(
                 f"Won't start transcription yet, no audio track found for {user_id}."
             )
+            self.metrics.session_start_failed(
+                self.provider_name, SESSION_FAILURE_NO_AUDIO_TRACK
+            )
             return
 
         if participant.identity in self.processing_info:
             logging.debug(
                 f"Transcription already running for {participant.identity}, ignoring."
             )
+            # A no-op, not a failure: nothing to record.
             return
 
         language = self._sanitize_locale(locale)
-        task = asyncio.create_task(
-            self._run_transcription_pipeline(participant, track, language)
+        task = self._spawn_pipeline(
+            self._run_transcription_pipeline(participant, track, language, locale)
         )
-        self.processing_info[participant.identity] = {"task": task}
+        self.processing_info[participant.identity] = {
+            "task": task,
+            "track_sid": track.sid,
+            # See BaseSttAgent.start_transcription_for_user.
+            "metrics_locale": locale,
+        }
+        self.metrics.session_started(self.provider_name, locale)
         logging.info(
             f"Started Voxtral Realtime transcription for {participant.identity} ({locale})."
         )
@@ -225,6 +245,7 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
         participant: rtc.RemoteParticipant,
         track: rtc.Track,
         language: str | None,
+        locale: str,
     ):
         ws_url = self._build_ws_url()
         # A vLLM server started without VLLM_API_KEY takes anonymous requests,
@@ -236,12 +257,12 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
             else {}
         )
         open_time = time.time()
-        self.open_time = open_time
         retry_delay = _RETRY_DELAY_INITIAL_S
         # Monotonic timestamp of the first handshake failure in the current
         # streak; cleared whenever a handshake succeeds, so a long meeting with
         # occasional reconnects never accumulates its way to the give-up bound.
         handshake_failing_since: float | None = None
+        handshake_gave_up = False
 
         try:
             while True:
@@ -250,50 +271,86 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                     async with self._get_http_session().ws_connect(
                         ws_url, headers=headers, heartbeat=_WS_HEARTBEAT_S
                     ) as ws:
-                        msg = await asyncio.wait_for(ws.receive(), timeout=10.0)
-                        if msg.type != aiohttp.WSMsgType.TEXT:
-                            raise _HandshakeError(
-                                f"expected TEXT for session.created, got {msg.type}"
-                            )
+                        # Exits that end the session release the slot here,
+                        # before the WebSocket and audio stream close. A stop
+                        # while they close would count the session as stopped
+                        # and cancel the teardown.
                         try:
-                            data = json.loads(msg.data)
-                        except (ValueError, TypeError) as e:
-                            raise _HandshakeError(
-                                f"malformed first message: {e}"
-                            ) from e
-                        if data.get("type") != "session.created":
-                            raise _HandshakeError(f"unexpected first message: {data}")
-                        logging.info(
-                            f"Voxtral WS session created for {participant.identity}"
-                        )
-                        # Connection is healthy again; reset reconnect backoff
-                        # and the handshake give-up streak.
-                        retry_delay = _RETRY_DELAY_INITIAL_S
-                        handshake_failing_since = None
+                            msg = await asyncio.wait_for(ws.receive(), timeout=10.0)
+                            if msg.type != aiohttp.WSMsgType.TEXT:
+                                raise _HandshakeError(
+                                    f"expected TEXT for session.created, got {msg.type}"
+                                )
+                            try:
+                                data = json.loads(msg.data)
+                            except (ValueError, TypeError) as e:
+                                raise _HandshakeError(
+                                    f"malformed first message: {e}"
+                                ) from e
+                            if data.get("type") != "session.created":
+                                raise _HandshakeError(
+                                    f"unexpected first message: {data}"
+                                )
+                            logging.info(
+                                f"Voxtral WS session created for {participant.identity}"
+                            )
+                            # Connection is healthy again; reset reconnect backoff
+                            # and the handshake give-up streak.
+                            retry_delay = _RETRY_DELAY_INITIAL_S
+                            handshake_failing_since = None
 
-                        # vLLM expects a FLAT session.update: its handler
-                        # reads event.get("model") off the top level, so
-                        # nesting under "session" fails validation with
-                        # "Missing required field: model" (probe test 6).
-                        # model is also the only field it reads — the
-                        # SessionUpdate model declares nothing else, and the
-                        # server hardcodes temperature=0.0 for every realtime
-                        # generation, which is the greedy decoding the model
-                        # card requires. temperature is sent anyway: it is
-                        # ignored today and correct if the field is ever
-                        # honoured.
-                        await ws.send_json(
-                            {
-                                "type": "session.update",
-                                "model": self.config.model,
-                                "temperature": 0.0,
-                            }
-                        )
+                            # vLLM expects a FLAT session.update: its handler
+                            # reads event.get("model") off the top level, so
+                            # nesting under "session" fails validation with
+                            # "Missing required field: model" (probe test 6).
+                            # model is also the only field it reads — the
+                            # SessionUpdate model declares nothing else, and the
+                            # server hardcodes temperature=0.0 for every realtime
+                            # generation, which is the greedy decoding the model
+                            # card requires. temperature is sent anyway: it is
+                            # ignored today and correct if the field is ever
+                            # honoured.
+                            await ws.send_json(
+                                {
+                                    "type": "session.update",
+                                    "model": self.config.model,
+                                    "temperature": 0.0,
+                                }
+                            )
 
-                        await self._vad_loop(
-                            ws, audio_stream, participant, language, open_time
-                        )
-                        return  # clean exit — audio stream finished normally
+                            await self._vad_loop(
+                                ws,
+                                audio_stream,
+                                participant,
+                                language,
+                                locale,
+                                open_time,
+                            )
+                            self._release_session_slot(
+                                participant.identity, SESSION_END_AUDIO_ENDED
+                            )
+                            return  # clean exit — audio stream finished normally
+                        except (
+                            TimeoutError,
+                            aiohttp.ClientError,
+                            ConnectionResetError,
+                        ):
+                            raise  # reconnected below; the session goes on
+                        except _HandshakeError:
+                            now = time.monotonic()
+                            if handshake_failing_since is None:
+                                handshake_failing_since = now
+                            if now - handshake_failing_since >= _HANDSHAKE_GIVE_UP_S:
+                                handshake_gave_up = True
+                                self._release_session_slot(
+                                    participant.identity, SESSION_END_ERROR
+                                )
+                            raise
+                        except Exception:
+                            self._release_session_slot(
+                                participant.identity, SESSION_END_ERROR
+                            )
+                            raise
 
                 except asyncio.CancelledError:
                     raise
@@ -303,10 +360,7 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                     # participant's transcription for the rest of the meeting:
                     # nothing re-arms the pipeline, because _on_track_subscribed
                     # only fires for a track that is not already subscribed.
-                    now = time.monotonic()
-                    if handshake_failing_since is None:
-                        handshake_failing_since = now
-                    if now - handshake_failing_since >= _HANDSHAKE_GIVE_UP_S:
+                    if handshake_gave_up:
                         logging.error(
                             f"Voxtral WS handshake still failing for "
                             f"{participant.identity} after "
@@ -342,6 +396,7 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                         f"Voxtral Realtime error for {participant.identity}: {e}",
                         exc_info=True,
                     )
+                    self._release_session_slot(participant.identity, SESSION_END_ERROR)
                     return
                 finally:
                     await audio_stream.aclose()
@@ -350,16 +405,14 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
             logging.info(
                 f"Voxtral Realtime transcription for {participant.identity} cancelled."
             )
+        except Exception as e:
+            logging.error(
+                f"Voxtral Realtime error for {participant.identity}: {e}",
+                exc_info=True,
+            )
         finally:
-            # Deregister only if this task still owns the entry: a locale
-            # change (stop→start) registers the replacement task before this
-            # cancelled task runs its finally block, so an unconditional pop
-            # would deregister the replacement — leaving it running but
-            # untracked (unstoppable, and a later start would spawn a
-            # duplicate pipeline on the same track).
-            info = self.processing_info.get(participant.identity)
-            if info and info.get("task") is asyncio.current_task():
-                self.processing_info.pop(participant.identity, None)
+            # A no-op when an exit above already released the slot.
+            self._release_session_slot(participant.identity, SESSION_END_ERROR)
 
     async def _vad_loop(
         self,
@@ -367,6 +420,7 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
         audio_stream: rtc.AudioStream,
         participant: rtc.RemoteParticipant,
         language: str | None,
+        locale: str,
         open_time: float,
     ):
         # `language` only labels the transcripts this pipeline emits; it is
@@ -451,6 +505,7 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                     ],
                 ),
                 open_time=open_time,
+                locale=locale,
             )
 
         # ── Reader ────────────────────────────────────────────────────────────

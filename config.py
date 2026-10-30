@@ -24,6 +24,19 @@ def _get_bool_env(key: str, default: bool | None) -> bool | None:
     return val.lower() in ("true", "1", "t")
 
 
+def _get_int_env(key: str, default: int | None) -> int | None:
+    val = os.getenv(key)
+
+    if val is None:
+        return default
+
+    try:
+        return int(val)
+    except ValueError:
+        print(f"Warning: Could not parse {key} as an integer, using {default}")
+        return default
+
+
 def _get_list_env(key: str, default: List[str] | None) -> List[str] | None:
     val = os.getenv(key)
 
@@ -76,6 +89,17 @@ class RedisConfig:
 
 redis_config = RedisConfig()
 
+
+@dataclass
+class MetricsConfig:
+    # Opt-in: unset means the worker exposes no /metrics listener.
+    prometheus_port: int | None = field(
+        default_factory=lambda: _get_int_env("BBB_STT_PROMETHEUS_PORT", None)
+    )
+
+
+metrics_config = MetricsConfig()
+
 stt_provider = os.getenv("STT_PROVIDER", "gladia").lower()
 
 
@@ -95,6 +119,7 @@ def redact_config_values(value: object, key: str | None = None) -> object:
 def get_redacted_app_config(stt_config) -> Dict[str, Any]:
     config_payload = {
         "redis": asdict(redis_config),
+        "metrics": asdict(metrics_config),
         "stt": asdict(stt_config),
     }
     return redact_config_values(config_payload)

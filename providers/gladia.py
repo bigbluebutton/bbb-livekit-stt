@@ -13,6 +13,12 @@ from config import (
     _get_list_env,
     _get_map_env,
 )
+from metrics import (
+    DISCARD_LOW_CONFIDENCE,
+    EVENT_TYPE_FINAL,
+    EVENT_TYPE_INTERIM,
+    SttMetrics,
+)
 from providers.base import BaseSttAgent, BaseSttConfig
 
 DEFAULT_TRANSLATION_LANG_MAP = "de:de-DE,en:en-US,es:es-ES,fr:fr-FR,hi:hi-IN,it:it-IT,ja:ja-JP,pt:pt-BR,ru:ru-RU,zh:zh-CN"
@@ -164,9 +170,19 @@ gladia_config = GladiaConfig()
 
 
 class GladiaSttAgent(BaseSttAgent):
-    def __init__(self, config: GladiaConfig):
-        super().__init__(config)
+    provider_name = "gladia"
+
+    def __init__(self, config: GladiaConfig, metrics: SttMetrics | None = None):
+        super().__init__(config, metrics)
         self.stt = GladiaSTT(**config.to_stt_kwargs())
+
+    @property
+    def reports_confidence(self) -> bool:
+        return True
+
+    @property
+    def translation_enabled(self) -> bool:
+        return bool(self.config.translation_enabled)
 
     @property
     def translation_lang_map(self) -> Dict[str, str]:
@@ -179,17 +195,13 @@ class GladiaSttAgent(BaseSttAgent):
 
         return self.stt.stream(language=locale)
 
-    def _update_stream_locale(self, user_id: str, locale: str):
-        stream = self.processing_info[user_id]["stream"]
-        sanitized_locale = self._sanitize_locale(locale)
-        # An empty languages list re-enables Gladia's auto-detection.
-        stream.update_options(languages=[sanitized_locale] if sanitized_locale else [])
-
     def _should_emit(self, event: stt.SpeechEvent) -> bool:
         if event.type == stt.SpeechEventType.FINAL_TRANSCRIPT:
             min_confidence = self.config.min_confidence_final
+            event_type = EVENT_TYPE_FINAL
         elif event.type == stt.SpeechEventType.INTERIM_TRANSCRIPT:
             min_confidence = self.config.min_confidence_interim
+            event_type = EVENT_TYPE_INTERIM
         else:
             return True
 
@@ -198,6 +210,9 @@ class GladiaSttAgent(BaseSttAgent):
                 logging.debug(
                     f"Discarding transcript: low confidence "
                     f"({alt.confidence} < {min_confidence})."
+                )
+                self.metrics.transcript_discarded(
+                    self.provider_name, event_type, DISCARD_LOW_CONFIDENCE
                 )
                 return False
 

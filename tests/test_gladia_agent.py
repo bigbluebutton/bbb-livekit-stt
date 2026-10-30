@@ -6,7 +6,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from livekit import rtc
 from livekit.agents import stt
 from livekit.plugins.gladia import STT as GladiaSTT
+from prometheus_client import CollectorRegistry
 
+from metrics import SttMetrics
 from providers.gladia import GladiaConfig, GladiaSttAgent
 
 
@@ -42,6 +44,7 @@ def _make_participant(identity, audio_track=None):
     pubs = {}
     if audio_track:
         pub = MagicMock()
+        pub.source = rtc.TrackSource.SOURCE_MICROPHONE
         pub.track = audio_track
         pub.track.kind = rtc.TrackKind.KIND_AUDIO
         pubs["audio"] = pub
@@ -85,7 +88,11 @@ class TestStopTranscriptionForUser:
     def test_cancels_task_and_removes_from_processing_info(self):
         agent = _make_agent()
         mock_task = MagicMock()
-        agent.processing_info["user_123"] = {"task": mock_task, "stream": MagicMock()}
+        agent.processing_info["user_123"] = {
+            "task": mock_task,
+            "stream": MagicMock(),
+            "metrics_locale": "en-US",
+        }
 
         agent.stop_transcription_for_user("user_123")
 
@@ -107,39 +114,30 @@ class TestUpdateLocaleForUser:
 
         assert agent.participant_settings["user_1"]["locale"] == "fr"
 
-    def test_calls_stream_update_options_when_transcription_active(self):
-        agent = _make_agent()
-        agent.participant_settings["user_1"] = {"locale": "en", "provider": "gladia"}
-        mock_stream = MagicMock()
-        agent.processing_info["user_1"] = {"stream": mock_stream, "task": MagicMock()}
+    def test_restarts_the_session_when_transcription_is_active(self):
+        """A locale change restarts the session; see update_locale_for_user()."""
+        mock_track = MagicMock()
+        mock_track.kind = rtc.TrackKind.KIND_AUDIO
+        participant = _make_participant("user_1", audio_track=mock_track)
+        agent = _make_agent_with_room(participants={"pid": participant})
+        agent.participant_settings["user_1"] = {"locale": "en-US", "provider": "gladia"}
+        agent.processing_info["user_1"] = {
+            "stream": MagicMock(),
+            "task": MagicMock(),
+            "track_sid": mock_track.sid,
+            "metrics_locale": "en-US",
+        }
 
-        agent.update_locale_for_user("user_1", "de")
+        with (
+            patch.object(agent, "stop_transcription_for_user") as mock_stop,
+            patch.object(agent, "start_transcription_for_user") as mock_start,
+        ):
+            agent.update_locale_for_user("user_1", "de-DE")
 
-        mock_stream.update_options.assert_called_once_with(languages=["de"])
+        mock_stop.assert_called_once_with("user_1")
+        mock_start.assert_called_once_with("user_1", "de-DE", "gladia")
 
-    def test_sends_empty_languages_for_auto_locale(self):
-        """'auto' locale should send empty languages list to trigger Gladia auto-detection."""
-        agent = _make_agent()
-        agent.participant_settings["user_1"] = {"locale": "en", "provider": "gladia"}
-        mock_stream = MagicMock()
-        agent.processing_info["user_1"] = {"stream": mock_stream, "task": MagicMock()}
-
-        agent.update_locale_for_user("user_1", "auto")
-
-        mock_stream.update_options.assert_called_once_with(languages=[])
-
-    def test_sanitizes_bcp47_locale_for_stream_update(self):
-        """update_locale_for_user should sanitize 'de-DE' → 'de' for the stream."""
-        agent = _make_agent()
-        agent.participant_settings["user_1"] = {"locale": "en", "provider": "gladia"}
-        mock_stream = MagicMock()
-        agent.processing_info["user_1"] = {"stream": mock_stream, "task": MagicMock()}
-
-        agent.update_locale_for_user("user_1", "de-DE")
-
-        mock_stream.update_options.assert_called_once_with(languages=["de"])
-
-    def test_does_not_call_update_options_when_no_active_transcription(self):
+    def test_does_not_restart_when_no_active_transcription(self):
         agent = _make_agent()
         agent.participant_settings["user_1"] = {"locale": "en", "provider": "gladia"}
 
@@ -159,7 +157,11 @@ class TestOnParticipantDisconnected:
         agent = _make_agent()
         agent.participant_settings["user_1"] = {"locale": "en", "provider": "gladia"}
         mock_task = MagicMock()
-        agent.processing_info["user_1"] = {"task": mock_task, "stream": MagicMock()}
+        agent.processing_info["user_1"] = {
+            "task": mock_task,
+            "stream": MagicMock(),
+            "metrics_locale": "en-US",
+        }
 
         mock_participant = MagicMock()
         mock_participant.identity = "user_1"
@@ -345,16 +347,19 @@ class TestRunTranscriptionPipeline:
         mock_audio_stream.__aiter__.side_effect = asyncio.CancelledError
 
         mock_stt_stream = AsyncMock()
+        mock_stt_stream.end_input = MagicMock()
         mock_stt_stream.__aiter__.return_value = iter([])
 
         agent.processing_info["user_1"] = {
             "stream": mock_stt_stream,
-            "task": MagicMock(),
+            # The keys the pipeline's cleanup reads; see _release_session_slot().
+            "task": asyncio.current_task(),
+            "metrics_locale": "en-US",
         }
 
         with patch("providers.base.rtc.AudioStream", return_value=mock_audio_stream):
             await agent._run_transcription_pipeline(
-                mock_participant, mock_track, mock_stt_stream
+                mock_participant, mock_track, mock_stt_stream, "pt-BR"
             )
 
         assert "user_1" not in agent.processing_info
@@ -374,6 +379,7 @@ class TestRunTranscriptionPipeline:
         mock_event = MagicMock()
         mock_event.type = stt.SpeechEventType.FINAL_TRANSCRIPT
         mock_stt_stream = AsyncMock()
+        mock_stt_stream.end_input = MagicMock()
         mock_stt_stream.__aiter__.return_value = iter([mock_event])
 
         emitted = []
@@ -381,7 +387,7 @@ class TestRunTranscriptionPipeline:
 
         with patch("providers.base.rtc.AudioStream", return_value=mock_audio_stream):
             await agent._run_transcription_pipeline(
-                mock_participant, mock_track, mock_stt_stream
+                mock_participant, mock_track, mock_stt_stream, "pt-BR"
             )
             await asyncio.sleep(0)
 
@@ -390,8 +396,10 @@ class TestRunTranscriptionPipeline:
         assert emitted[0]["event"] is mock_event
 
     async def test_emits_interim_transcript_when_enabled(self):
-        """INTERIM_TRANSCRIPT events should be emitted only when interim_results is set."""
+        """INTERIM_TRANSCRIPT events should be emitted only when interim_results is set
+        and the participant asked for partial utterances."""
         agent = _make_agent(interim_results=True)
+        agent.participant_settings["user_1"] = {"partial_utterances": True}
         mock_participant = MagicMock(spec=rtc.RemoteParticipant)
         mock_participant.identity = "user_1"
         mock_track = MagicMock()
@@ -402,6 +410,7 @@ class TestRunTranscriptionPipeline:
         mock_event = MagicMock()
         mock_event.type = stt.SpeechEventType.INTERIM_TRANSCRIPT
         mock_stt_stream = AsyncMock()
+        mock_stt_stream.end_input = MagicMock()
         mock_stt_stream.__aiter__.return_value = iter([mock_event])
 
         emitted = []
@@ -409,7 +418,7 @@ class TestRunTranscriptionPipeline:
 
         with patch("providers.base.rtc.AudioStream", return_value=mock_audio_stream):
             await agent._run_transcription_pipeline(
-                mock_participant, mock_track, mock_stt_stream
+                mock_participant, mock_track, mock_stt_stream, "pt-BR"
             )
             await asyncio.sleep(0)
 
@@ -428,6 +437,7 @@ class TestRunTranscriptionPipeline:
         mock_event = MagicMock()
         mock_event.type = stt.SpeechEventType.INTERIM_TRANSCRIPT
         mock_stt_stream = AsyncMock()
+        mock_stt_stream.end_input = MagicMock()
         mock_stt_stream.__aiter__.return_value = iter([mock_event])
 
         emitted = []
@@ -435,7 +445,7 @@ class TestRunTranscriptionPipeline:
 
         with patch("providers.base.rtc.AudioStream", return_value=mock_audio_stream):
             await agent._run_transcription_pipeline(
-                mock_participant, mock_track, mock_stt_stream
+                mock_participant, mock_track, mock_stt_stream, "pt-BR"
             )
             await asyncio.sleep(0)
 
@@ -452,16 +462,19 @@ class TestRunTranscriptionPipeline:
         mock_audio_stream.__aiter__.side_effect = RuntimeError("boom")
 
         mock_stt_stream = AsyncMock()
+        mock_stt_stream.end_input = MagicMock()
         mock_stt_stream.__aiter__.return_value = iter([])
 
         agent.processing_info["user_1"] = {
             "stream": mock_stt_stream,
-            "task": MagicMock(),
+            # The keys the pipeline's cleanup reads; see _release_session_slot().
+            "task": asyncio.current_task(),
+            "metrics_locale": "en-US",
         }
 
         with patch("providers.base.rtc.AudioStream", return_value=mock_audio_stream):
             await agent._run_transcription_pipeline(
-                mock_participant, mock_track, mock_stt_stream
+                mock_participant, mock_track, mock_stt_stream, "pt-BR"
             )
 
         assert "user_1" not in agent.processing_info
@@ -473,12 +486,47 @@ class TestCleanup:
         agent = _make_agent()
         tasks = {}
         for uid in ("user_1", "user_2", "user_3"):
-            mock_task = MagicMock()
-            agent.processing_info[uid] = {"task": mock_task, "stream": MagicMock()}
-            tasks[uid] = mock_task
+            # Real tasks: _cleanup waits for the pipelines it cancels.
+            task = agent._spawn_pipeline(asyncio.Event().wait())
+            agent.processing_info[uid] = {
+                "task": task,
+                "stream": MagicMock(),
+                "started": True,
+                "metrics_locale": "en-US",
+            }
+            tasks[uid] = task
 
         await agent._cleanup()
 
-        for uid, mock_task in tasks.items():
-            mock_task.cancel.assert_called_once()
+        for uid, task in tasks.items():
+            assert task.cancelled()
             assert uid not in agent.processing_info
+
+
+def _make_metered_agent(**config_kwargs):
+    """Returns (agent, registry). Mirrors _make_agent but injects a registry."""
+    registry = CollectorRegistry()
+    config = GladiaConfig(api_key="fake-key", **config_kwargs)
+    with patch("providers.gladia.GladiaSTT", spec=GladiaSTT):
+        agent = GladiaSttAgent(config, metrics=SttMetrics(registry))
+    return agent, registry
+
+
+class TestProviderCapabilities:
+    def test_provider_name(self):
+        agent, _ = _make_metered_agent()
+        assert agent.provider_name == "gladia"
+
+    def test_reports_confidence(self):
+        agent, _ = _make_metered_agent()
+        assert agent.reports_confidence is True
+
+    def test_translation_enabled_is_false_by_default(self):
+        agent, _ = _make_metered_agent()
+        assert agent.translation_enabled is False
+
+    def test_translation_enabled_follows_config(self):
+        agent, _ = _make_metered_agent(
+            translation_enabled=True, translation_target_languages=["pt"]
+        )
+        assert agent.translation_enabled is True

@@ -2,6 +2,8 @@ import asyncio
 import base64
 import json
 import logging
+import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
@@ -11,8 +13,15 @@ from livekit import rtc
 from livekit.agents import stt
 
 from livekit.agents import vad as agents_vad
+from prometheus_client import CollectorRegistry
 
+from metrics import (
+    SESSION_FAILURE_NO_AUDIO_TRACK,
+    SESSION_FAILURE_PARTICIPANT_NOT_FOUND,
+    SttMetrics,
+)
 from providers.voxtral_realtime import (
+    _HANDSHAKE_GIVE_UP_S,
     VoxtralRealtimeConfig,
     VoxtralRealtimeSttAgent,
     _AudioNormalizer,
@@ -57,6 +66,7 @@ def _make_participant(identity, has_audio_track=True):
         mock_track.kind = rtc.TrackKind.KIND_AUDIO
         pub = MagicMock()
         pub.track = mock_track
+        pub.source = rtc.TrackSource.SOURCE_MICROPHONE
         pubs["audio"] = pub
     participant.track_publications = pubs
     return participant
@@ -301,7 +311,7 @@ class TestStartTranscriptionForUser:
             agent.start_transcription_for_user("user_1", "pt-BR", "voxtral-realtime")
             await asyncio.sleep(0)
 
-        # _run_transcription_pipeline(participant, track, language) — language must be "pt"
+        # Arguments are (participant, track, language, locale): language must be "pt".
         assert mock_pipeline.call_args[0][2] == "pt"
         agent.processing_info.pop("user_1", None)
 
@@ -426,7 +436,9 @@ class TestRunTranscriptionPipeline:
         with patch(
             "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
         ):
-            await agent._run_transcription_pipeline(participant, MagicMock(), "en")
+            await agent._run_transcription_pipeline(
+                participant, MagicMock(), "en", "en-US"
+            )
 
         assert "user_1" not in agent.processing_info
         return agent._http_session.ws_connect
@@ -570,7 +582,9 @@ class TestVadLoop:
         with patch(
             "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
         ):
-            await agent._run_transcription_pipeline(participant, MagicMock(), "en")
+            await agent._run_transcription_pipeline(
+                participant, MagicMock(), "en", "en-US"
+            )
 
         assert emitted == []
 
@@ -594,7 +608,9 @@ class TestVadLoop:
         with patch(
             "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
         ):
-            await agent._run_transcription_pipeline(participant, MagicMock(), "en")
+            await agent._run_transcription_pipeline(
+                participant, MagicMock(), "en", "en-US"
+            )
         await asyncio.sleep(0)
 
         assert len(emitted) == 1
@@ -621,12 +637,41 @@ class TestVadLoop:
         with patch(
             "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
         ):
-            await agent._run_transcription_pipeline(participant, MagicMock(), "en")
+            await agent._run_transcription_pipeline(
+                participant, MagicMock(), "en", "en-US"
+            )
         await asyncio.sleep(0)
 
         assert len(interim) >= 1
         assert interim[0]["event"].type == stt.SpeechEventType.INTERIM_TRANSCRIPT
         assert len(final) == 1
+
+    async def test_transcripts_carry_the_session_locale(self):
+        """main.py publishes each transcript under the locale it was transcribed
+        in, so every emit must carry the session's BBB locale."""
+        loud = _make_loud_frame()
+        agent, participant, mock_stream = self._full_pipeline_setup(
+            audio_frames=[loud],
+            ws_messages=[
+                _text_ws_msg({"type": "transcription.delta", "delta": "oi"}),
+                _text_ws_msg({"type": "transcription.done", "text": "oi"}),
+            ],
+        )
+
+        emitted = []
+        agent.on("interim_transcript", lambda **kw: emitted.append(kw))
+        agent.on("final_transcript", lambda **kw: emitted.append(kw))
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
+        ):
+            await agent._run_transcription_pipeline(
+                participant, MagicMock(), "pt", "pt-BR"
+            )
+        await asyncio.sleep(0)
+
+        assert emitted
+        assert {kw["locale"] for kw in emitted} == {"pt-BR"}
 
     async def test_empty_deltas_do_not_reemit_the_same_interim(self):
         """
@@ -654,7 +699,9 @@ class TestVadLoop:
         with patch(
             "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
         ):
-            await agent._run_transcription_pipeline(participant, MagicMock(), "en")
+            await agent._run_transcription_pipeline(
+                participant, MagicMock(), "en", "en-US"
+            )
         await asyncio.sleep(0)
 
         texts = [kw["event"].alternatives[0].text for kw in interim]
@@ -685,7 +732,9 @@ class TestVadLoop:
         with patch(
             "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
         ):
-            await agent._run_transcription_pipeline(participant, MagicMock(), None)
+            await agent._run_transcription_pipeline(
+                participant, MagicMock(), None, "auto"
+            )
         await asyncio.sleep(0)
 
         assert len(final) == 1
@@ -723,7 +772,9 @@ class TestVadLoop:
         with patch(
             "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
         ):
-            await agent._run_transcription_pipeline(participant, MagicMock(), "en")
+            await agent._run_transcription_pipeline(
+                participant, MagicMock(), "en", "en-US"
+            )
         await asyncio.sleep(0)
 
         final_texts = [kw["event"].alternatives[0].text for kw in final]
@@ -762,7 +813,9 @@ class TestVadLoop:
         with patch(
             "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
         ):
-            await agent._run_transcription_pipeline(participant, MagicMock(), "en")
+            await agent._run_transcription_pipeline(
+                participant, MagicMock(), "en", "en-US"
+            )
         await asyncio.sleep(0)
 
         assert len(final) == 1
@@ -820,7 +873,9 @@ class TestVadLoop:
         with patch(
             "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
         ):
-            await agent._run_transcription_pipeline(participant, MagicMock(), "en")
+            await agent._run_transcription_pipeline(
+                participant, MagicMock(), "en", "en-US"
+            )
 
         commits = [m for m in sent if m.get("type") == "input_audio_buffer.commit"]
         # Each open sends one bare commit; each close sends one final commit.
@@ -942,7 +997,9 @@ class TestVadLoop:
         with patch(
             "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
         ):
-            await agent._run_transcription_pipeline(participant, MagicMock(), "en")
+            await agent._run_transcription_pipeline(
+                participant, MagicMock(), "en", "en-US"
+            )
         await asyncio.sleep(0)
 
         texts = [kw["event"].alternatives[0].text for kw in final]
@@ -1057,7 +1114,9 @@ class TestSplitOverlap:
         with patch(
             "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
         ):
-            await agent._run_transcription_pipeline(participant, MagicMock(), "en")
+            await agent._run_transcription_pipeline(
+                participant, MagicMock(), "en", "en-US"
+            )
 
         segments = _segments_from_sent(sent)
         assert len(segments) >= 2, f"expected a split, got {len(segments)} segment(s)"
@@ -1096,7 +1155,9 @@ class TestSplitOverlap:
             "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
         ):
             await asyncio.wait_for(
-                agent._run_transcription_pipeline(participant, MagicMock(), "en"),
+                agent._run_transcription_pipeline(
+                    participant, MagicMock(), "en", "en-US"
+                ),
                 timeout=5.0,
             )
 
@@ -1296,7 +1357,9 @@ class TestCommitGate:
             "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
         ):
             await asyncio.wait_for(
-                agent._run_transcription_pipeline(participant, MagicMock(), "en"),
+                agent._run_transcription_pipeline(
+                    participant, MagicMock(), "en", "en-US"
+                ),
                 timeout=5.0,
             )
         await asyncio.sleep(0)
@@ -1387,7 +1450,9 @@ class TestCommitGate:
             "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
         ):
             await asyncio.wait_for(
-                agent._run_transcription_pipeline(participant, MagicMock(), "en"),
+                agent._run_transcription_pipeline(
+                    participant, MagicMock(), "en", "en-US"
+                ),
                 timeout=5.0,
             )
         await asyncio.sleep(0)
@@ -1437,7 +1502,9 @@ class TestCommitGate:
             caplog.at_level("WARNING"),
         ):
             await asyncio.wait_for(
-                agent._run_transcription_pipeline(participant, MagicMock(), "en"),
+                agent._run_transcription_pipeline(
+                    participant, MagicMock(), "en", "en-US"
+                ),
                 timeout=5.0,
             )
 
@@ -1506,7 +1573,9 @@ class TestCommitGate:
             return_value=mock_stream,
         ):
             await asyncio.wait_for(
-                agent._run_transcription_pipeline(participant, MagicMock(), "en"),
+                agent._run_transcription_pipeline(
+                    participant, MagicMock(), "en", "en-US"
+                ),
                 timeout=5.0,
             )
         await asyncio.sleep(0)
@@ -1622,7 +1691,9 @@ class TestReaderFailureRecovery:
             side_effect=[_EndlessAudioStream(), empty_stream],
         ):
             await asyncio.wait_for(
-                agent._run_transcription_pipeline(participant, MagicMock(), "en"),
+                agent._run_transcription_pipeline(
+                    participant, MagicMock(), "en", "en-US"
+                ),
                 timeout=5.0,
             )
 
@@ -1652,7 +1723,9 @@ class TestSessionUpdate:
 
         with patch("providers.voxtral_realtime.rtc.AudioStream", return_value=empty):
             await asyncio.wait_for(
-                agent._run_transcription_pipeline(participant, MagicMock(), "en"),
+                agent._run_transcription_pipeline(
+                    participant, MagicMock(), "en", "en-US"
+                ),
                 timeout=5.0,
             )
 
@@ -1705,7 +1778,9 @@ class TestHandshakeTimeout:
             "providers.voxtral_realtime.rtc.AudioStream", side_effect=[empty, empty2]
         ):
             await asyncio.wait_for(
-                agent._run_transcription_pipeline(participant, MagicMock(), "en"),
+                agent._run_transcription_pipeline(
+                    participant, MagicMock(), "en", "en-US"
+                ),
                 timeout=5.0,
             )
 
@@ -1717,7 +1792,7 @@ class TestHandshakeTimeout:
 class TestLocaleUpdateRace:
     async def test_locale_change_does_not_orphan_replacement_pipeline(self):
         """
-        Regression for the stop→start restart race: _update_stream_locale
+        Regression for the stop→start restart race: update_locale_for_user
         cancels the old pipeline task and synchronously registers a new one
         under the same identity. task.cancel() only schedules the
         cancellation, so the old task's cleanup runs AFTER the new entry
@@ -1744,7 +1819,7 @@ class TestLocaleUpdateRace:
             task1 = agent.processing_info["user_1"]["task"]
             await asyncio.sleep(0.05)  # let pipeline 1 get going
 
-            agent._update_stream_locale("user_1", "de-DE")
+            agent.update_locale_for_user("user_1", "de-DE")
             task2 = agent.processing_info["user_1"]["task"]
             assert task2 is not task1
 
@@ -1801,7 +1876,9 @@ class TestTeardownFlush:
             return_value=_EndlessAudioStream(),
         ):
             task = asyncio.create_task(
-                agent._run_transcription_pipeline(participant, MagicMock(), "en")
+                agent._run_transcription_pipeline(
+                    participant, MagicMock(), "en", "en-US"
+                )
             )
             # Wait until the delta has been received and emitted as interim.
             for _ in range(500):
@@ -1876,7 +1953,9 @@ class TestTeardownFlush:
             "providers.voxtral_realtime.rtc.AudioStream", return_value=mock_stream
         ):
             await asyncio.wait_for(
-                agent._run_transcription_pipeline(participant, MagicMock(), "en"),
+                agent._run_transcription_pipeline(
+                    participant, MagicMock(), "en", "en-US"
+                ),
                 timeout=5.0,
             )
         await asyncio.sleep(0)
@@ -1886,3 +1965,319 @@ class TestTeardownFlush:
             f"the tail segment's late transcription.done must still be read "
             f"before teardown, got {texts}"
         )
+
+
+def _make_metered_agent(participants=None):
+    registry = CollectorRegistry()
+    agent = VoxtralRealtimeSttAgent(
+        _make_config(), vad=_make_mock_vad(), metrics=SttMetrics(registry)
+    )
+    agent.room = MagicMock()
+    agent.room.remote_participants = participants or {}
+    return agent, registry
+
+
+class TestVoxtralSessionMetrics:
+    def test_provider_name(self):
+        agent, _ = _make_metered_agent()
+        assert agent.provider_name == "voxtral-realtime"
+
+    def test_records_participant_not_found(self):
+        agent, registry = _make_metered_agent()
+
+        agent.start_transcription_for_user("ghost", "en-US", "voxtral-realtime")
+
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_session_start_failures_total",
+                {
+                    "provider": "voxtral-realtime",
+                    "reason": SESSION_FAILURE_PARTICIPANT_NOT_FOUND,
+                },
+            )
+            == 1.0
+        )
+
+    def test_records_no_audio_track(self):
+        participant = _make_participant("user_1", has_audio_track=False)
+        agent, registry = _make_metered_agent({"p": participant})
+
+        agent.start_transcription_for_user("user_1", "en-US", "voxtral-realtime")
+
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_session_start_failures_total",
+                {
+                    "provider": "voxtral-realtime",
+                    "reason": SESSION_FAILURE_NO_AUDIO_TRACK,
+                },
+            )
+            == 1.0
+        )
+
+    async def test_locale_change_moves_the_gauge_via_restart(self):
+        """A locale change restarts the pipeline, so the stop and start paths
+        move the gauge from en to pt."""
+        agent, registry = _make_metered_agent({"p": _make_participant("user_1")})
+
+        with patch.object(agent, "_run_transcription_pipeline", new=AsyncMock()):
+            agent.start_transcription_for_user("user_1", "en-US", "voxtral-realtime")
+            agent.update_locale_for_user("user_1", "pt-BR")
+            await asyncio.sleep(0)
+
+        labels = {"provider": "voxtral-realtime"}
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_active_sessions", {**labels, "language": "en"}
+            )
+            == 0.0
+        )
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_active_sessions", {**labels, "language": "pt"}
+            )
+            == 1.0
+        )
+
+
+class TestSessionGaugeOnSelfEnd:
+    """A pipeline that ends on its own decrements its gauge through
+    _release_session_slot(), as the base and OpenAI pipelines do."""
+
+    def _ended(self, registry, reason):
+        return registry.get_sample_value(
+            "bbb_stt_session_ends_total",
+            {"provider": "voxtral-realtime", "reason": reason},
+        )
+
+    def _gauge(self, registry):
+        return registry.get_sample_value(
+            "bbb_stt_active_sessions",
+            {"provider": "voxtral-realtime", "language": "en"},
+        )
+
+    async def _start_and_wait(self, agent):
+        agent.start_transcription_for_user("user_1", "en-US", "voxtral-realtime")
+        task = agent.processing_info["user_1"]["task"]
+        await asyncio.wait_for(task, timeout=5.0)
+        return task
+
+    async def test_handshake_give_up_returns_the_gauge(self, monkeypatch):
+        monkeypatch.setattr("providers.voxtral_realtime._HANDSHAKE_GIVE_UP_S", 0.0)
+        agent, registry = _make_metered_agent({"p": _make_participant("user_1")})
+        session = MagicMock()
+        session.ws_connect = MagicMock(
+            return_value=_ws_context(_ScriptedWs([_binary_ws_msg()]))
+        )
+        agent._http_session = session
+        audio_stream = MagicMock()
+        audio_stream.aclose = AsyncMock()
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream", return_value=audio_stream
+        ):
+            await self._start_and_wait(agent)
+
+        assert "user_1" not in agent.processing_info
+        assert self._gauge(registry) == 0.0
+        assert self._ended(registry, "error") == 1.0
+
+    async def test_audio_stream_failure_returns_the_gauge(self):
+        agent, registry = _make_metered_agent({"p": _make_participant("user_1")})
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream",
+            side_effect=RuntimeError("native handle failed"),
+        ):
+            task = await self._start_and_wait(agent)
+
+        assert task.exception() is None
+        assert "user_1" not in agent.processing_info
+        assert self._gauge(registry) == 0.0
+
+    @pytest.mark.parametrize(
+        "vad_loop_error", [None, ValueError("server sent garbage")]
+    )
+    async def test_the_slot_is_released_before_the_teardown_awaits(
+        self, vad_loop_error
+    ):
+        """The slot is released before the WebSocket and the audio stream close.
+        A stop during those awaits would otherwise record the end as stopped
+        and cancel the teardown."""
+        agent, registry = _make_metered_agent({"p": _make_participant("user_1")})
+        seen = {}
+
+        context = AsyncMock()
+        context.__aenter__ = AsyncMock(
+            return_value=_ScriptedWs([_text_ws_msg({"type": "session.created"})])
+        )
+
+        async def on_ws_exit(*_):
+            seen["ws_close"] = "user_1" in agent.processing_info
+            return False
+
+        context.__aexit__ = AsyncMock(side_effect=on_ws_exit)
+        agent._http_session = MagicMock()
+        agent._http_session.ws_connect = MagicMock(return_value=context)
+
+        audio_stream = AsyncMock()
+        audio_stream.__aiter__.return_value = iter([])
+
+        async def on_audio_close():
+            seen["audio_close"] = "user_1" in agent.processing_info
+
+        audio_stream.aclose = AsyncMock(side_effect=on_audio_close)
+
+        if vad_loop_error is not None:
+            agent._vad_loop = AsyncMock(side_effect=vad_loop_error)
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream", return_value=audio_stream
+        ):
+            await self._start_and_wait(agent)
+
+        assert seen == {"ws_close": False, "audio_close": False}
+        reason = "audio_ended" if vad_loop_error is None else "error"
+        assert self._ended(registry, reason) == 1.0
+
+    def _connections(self, agent, first_messages):
+        """Build one WebSocket per first message. Each records, when it closes,
+        whether user_1 is still in processing_info."""
+        held = []
+
+        def connection(first_message):
+            context = AsyncMock()
+            context.__aenter__ = AsyncMock(return_value=_ScriptedWs([first_message]))
+
+            async def on_exit(*_):
+                held.append("user_1" in agent.processing_info)
+                return False
+
+            context.__aexit__ = AsyncMock(side_effect=on_exit)
+            return context
+
+        agent._http_session = MagicMock()
+        agent._http_session.ws_connect = MagicMock(
+            side_effect=[connection(m) for m in first_messages]
+        )
+        return held
+
+    @staticmethod
+    def _audio_stream():
+        audio_stream = AsyncMock()
+        audio_stream.__aiter__.return_value = iter([])
+        audio_stream.aclose = AsyncMock()
+        return audio_stream
+
+    async def test_a_transport_error_keeps_the_session_and_reconnects(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr("providers.voxtral_realtime._RETRY_DELAY_INITIAL_S", 0)
+        agent, registry = _make_metered_agent({"p": _make_participant("user_1")})
+        created = _text_ws_msg({"type": "session.created"})
+        held = self._connections(agent, [created, created])
+        agent._vad_loop = AsyncMock(side_effect=[TimeoutError(), None])
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream",
+            return_value=self._audio_stream(),
+        ):
+            await self._start_and_wait(agent)
+
+        assert held == [True, False]
+        assert self._ended(registry, "audio_ended") == 1.0
+        assert self._ended(registry, "error") is None
+
+    async def test_a_handshake_give_up_releases_before_the_ws_closes(self, monkeypatch):
+        monkeypatch.setattr("providers.voxtral_realtime._HANDSHAKE_GIVE_UP_S", 0.0)
+        agent, registry = _make_metered_agent({"p": _make_participant("user_1")})
+        held = self._connections(agent, [_binary_ws_msg()])
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream",
+            return_value=self._audio_stream(),
+        ):
+            await self._start_and_wait(agent)
+
+        assert held == [False]
+        assert self._ended(registry, "error") == 1.0
+
+    async def test_a_handshake_error_before_the_give_up_keeps_the_session(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr("providers.voxtral_realtime._RETRY_DELAY_INITIAL_S", 0)
+        agent, registry = _make_metered_agent({"p": _make_participant("user_1")})
+        created = _text_ws_msg({"type": "session.created"})
+        held = self._connections(agent, [_binary_ws_msg(), created])
+        agent._vad_loop = AsyncMock(return_value=None)
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream",
+            return_value=self._audio_stream(),
+        ):
+            await self._start_and_wait(agent)
+
+        assert held == [True, False]
+        assert self._ended(registry, "audio_ended") == 1.0
+        assert self._ended(registry, "error") is None
+
+    async def test_a_successful_handshake_restarts_the_give_up_window(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr("providers.voxtral_realtime._RETRY_DELAY_INITIAL_S", 0)
+        # Module-local: patching time.monotonic itself would move asyncio's clock.
+        clock = SimpleNamespace(monotonic=lambda: now, time=time.time)
+        monkeypatch.setattr("providers.voxtral_realtime.time", clock)
+        now = 0.0
+        agent, registry = _make_metered_agent({"p": _make_participant("user_1")})
+        created = _text_ws_msg({"type": "session.created"})
+        self._connections(agent, [_binary_ws_msg(), created, _binary_ws_msg(), created])
+
+        async def vad_loop(*_):
+            nonlocal now
+            if now == 0.0:
+                now = 2 * _HANDSHAKE_GIVE_UP_S
+                raise TimeoutError()
+
+        agent._vad_loop = vad_loop
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream",
+            return_value=self._audio_stream(),
+        ):
+            await self._start_and_wait(agent)
+
+        assert self._ended(registry, "audio_ended") == 1.0
+        assert self._ended(registry, "error") is None
+
+
+class TestTrackScoping:
+    async def test_only_the_sessions_own_track_ends_it(self):
+        """_on_track_unsubscribed matches the session's track_sid: another
+        audio track going away leaves the session running."""
+        participant = _make_participant("user_1")
+        mic = participant.track_publications["audio"].track
+        mic.sid = "TR_mic"
+        agent = _make_agent_with_room(participants={"p1": participant})
+        other = MagicMock()
+        other.sid = "TR_screenshare"
+
+        with patch.object(agent, "_run_transcription_pipeline", new=AsyncMock()):
+            agent.start_transcription_for_user("user_1", "en-US", "voxtral-realtime")
+            agent._on_track_unsubscribed(other, MagicMock(), participant)
+            assert "user_1" in agent.processing_info
+
+            agent._on_track_unsubscribed(mic, MagicMock(), participant)
+            await asyncio.sleep(0)
+
+        assert "user_1" not in agent.processing_info
+
+
+class TestShutdownRefusesNewSessions:
+    def test_no_session_starts_once_shutdown_begins(self):
+        agent = _make_agent_with_room(participants={"p": _make_participant("user_1")})
+        agent._shutdown.set()
+
+        agent.start_transcription_for_user("user_1", "en-US", "voxtral-realtime")
+
+        assert "user_1" not in agent.processing_info

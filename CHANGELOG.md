@@ -9,15 +9,42 @@ Final releases will consolidate all intermediate changes in chronological order.
 
 * feat(openai): add OpenAI STT provider support (official and compatible endpoints)
 * feat: add GladiaSttAgent provider and factory
+* feat: add Prometheus collectors for the STT agent
+* feat: expose Prometheus metrics behind BBB_STT_PROMETHEUS_PORT
+* feat: instrument session lifecycle across the STT providers
+* feat: instrument transcript publication and discards
+* feat: count transcription session ends by reason
+* feat: drop the gauges of job processes that have exited
 * refactor: extract BaseSttAgent and BaseSttConfig into providers/base.py
 * refactor: move GladiaConfig to providers package, delete old agent module
 * fix: keep a user's speech locale when they reconnect
 * fix: drop transcripts with no resolvable BBB locale instead of publishing a null one
+* fix: report Redis connect and publish failures to callers
+* fix: restart transcription when a speech locale is reassigned
+* fix: keep a restarted transcription session's processing_info entry
+* fix: return the session gauge when a pipeline ends on its own
+* fix: transcribe a participant's microphone track only
+* fix: close the provider streams when a transcription session ends
+* fix: stamp each transcript with its own session's start time
+* fix: restart a transcription session when its locale changes
+* fix: close a provider stream whose pipeline never started
+* fix: wait for the sessions a shutting-down agent tears down
+* fix: end a session when its provider stream ends first
+* fix: publish each transcript under the locale it was transcribed in
+* fix: warn when the metrics port is set without PROMETHEUS_MULTIPROC_DIR
+* fix: count transcript discards by event type
+* fix: label the session gauge with a bounded language
+* fix: keep a Redis outage at job start from ending the job with an error
+* fix: load .env before anything reads the environment
 * build(docker): add LOG_LEVEL env var to control the container's log level
 * build: declare aiohttp and numpy as direct dependencies
+* build: count main.py in coverage
 * docs: correct how the OpenAI provider reaches the API and list its caveats
 * docs: expand and correct AGENTS.md
 * feat(voxtral): Voxtral Realtime STT provider with concurrent streaming and Silero neural VAD on Python 3.11
+* docs: document Prometheus metrics and their operational caveats
+* docs: document the transcription session lifecycle contracts
+* docs: correct the session lifecycle and locale-change contracts
 
 ## v0.3.0
 

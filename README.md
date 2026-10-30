@@ -113,6 +113,85 @@ docker run --network host --rm -it --env-file .env -e LOG_LEVEL=DEBUG bbb-liveki
 
 Pre-built images are available via GitHub Container Registry as well.
 
+### Metrics
+
+The agent exposes Prometheus metrics through the LiveKit worker's built-in
+endpoint. Metrics are **opt-in**: set `BBB_STT_PROMETHEUS_PORT` to enable them.
+
+```bash
+BBB_STT_PROMETHEUS_PORT=8082
+PROMETHEUS_MULTIPROC_DIR=/tmp/prometheus-multiproc
+```
+
+Scrape `http://<host>:8082/metrics`.
+
+`PROMETHEUS_MULTIPROC_DIR` is required. LiveKit runs each room job in its own
+process, and every `bbb_stt_*` metric reaches the endpoint only through this
+shared directory. Set it in the environment or in `.env`; the Docker image sets
+it whenever the port is set.
+
+With Docker:
+
+```bash
+docker run --network host --rm -it --env-file .env \
+  -e BBB_STT_PROMETHEUS_PORT=8082 bbb-livekit-stt
+```
+
+The endpoint also serves LiveKit's own `lk_agents_*` metrics (active jobs, worker
+load, child process count).
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `bbb_stt_active_sessions` | Gauge | `provider`, `language` | Active transcription sessions, one per subscribed microphone track. `language` is the locale's ISO 639-1 code, `auto`, or `other` |
+| `bbb_stt_active_agents` | Gauge | `provider` | Running agents, one per room job |
+| `bbb_stt_session_starts_total` | Counter | `provider` | Sessions successfully started |
+| `bbb_stt_session_start_failures_total` | Counter | `provider`, `reason` | Sessions that could not be established |
+| `bbb_stt_session_ends_total` | Counter | `provider`, `reason` | Sessions that ended: `stopped`, `provider_closed`, `audio_ended` or `error` |
+| `bbb_stt_agent_start_failures_total` | Counter | `provider`, `reason` | Agents that could not be established |
+| `bbb_stt_transcripts_total` | Counter | `provider`, `event_type` | Transcripts that passed filtering and were sent to BBB |
+| `bbb_stt_transcripts_discarded_total` | Counter | `provider`, `event_type`, `reason` | Transcripts dropped before publication |
+| `bbb_stt_transcript_confidence` | Histogram | `provider`, `event_type` | Confidence of published transcripts (Gladia only) |
+| `bbb_stt_utterance_duration_seconds` | Histogram | `provider`, `event_type` | Duration of transcribed utterances |
+| `bbb_stt_provider_audio_seconds_total` | Counter | `provider` | Audio seconds sent to the provider, as counted by the Gladia plugin (Gladia only) |
+| `bbb_stt_language_detection_mismatch_total` | Counter | `provider` | Transcripts whose language differs from the requested one |
+| `bbb_stt_transcript_publish_failures_total` | Counter | `provider` | Transcripts lost because publishing to Redis failed |
+
+Caveats worth knowing:
+- No metric carries a meeting or user label, to keep cardinality bounded. The
+  logs carry per-meeting detail.
+- **`bbb_stt_session_start_failures_total{reason="no_audio_track"}` is usually
+  benign.** BBB routinely sends the speech-locale change before the participant
+  publishes a microphone track, and the session starts moments later. Alert on
+  its rate relative to `bbb_stt_session_starts_total`, not on the raw count.
+- **`bbb_stt_transcripts_total` counts transcripts that were *sent*, not
+  confirmed.** A transcript is counted even when the Redis publish fails, so the
+  confidence histogram has no gaps during a Redis outage. Subtract
+  `bbb_stt_transcript_publish_failures_total` for what BBB received.
+- **`bbb_stt_provider_audio_seconds_total` undercounts.** The Gladia plugin
+  reports audio every 5 s or so. Audio sent after the last report can be lost
+  when a session ends: under 5 s normally, more after a slow Gladia connection.
+- **A killed job keeps counting for up to a minute.** The kernel kills a job for
+  memory, and LiveKit for missed pings or an overrun shutdown. The worker drops
+  the gauges of exited processes every 60 s. The sessions such a job was running
+  get no `bbb_stt_session_ends_total` sample.
+- **The multiprocess directory grows with every job.** Each job leaves a counter
+  and a histogram file there until the worker restarts, so scrapes slow down over
+  a long-running worker's life.
+- **A locale change restarts the participant's session.** It appears as a stop
+  and a start: `bbb_stt_session_starts_total` advances and the session gauge moves
+  between language labels.
+- **A provider can reject a session after accepting it.** Gladia checks the
+  language only once its stream runs. A locale it cannot honour starts a session
+  that ends with `bbb_stt_session_ends_total{reason="error"}`.
+- **Voxtral gives up on a server that keeps refusing sessions.** A refusal is a
+  WebSocket that opens, then closes or sends another event than
+  `session.created`. A refusal 10 minutes after an earlier one, with no session
+  started since, ends the session with `reason="error"`.
+- **Voxtral and OpenAI ride out outages.** Voxtral retries forever when a
+  connection fails to open, as on a 502. It does the same when the WebSocket
+  opens but no event arrives within 10 s, or when a started session drops.
+  OpenAI logs a failed segment and moves on.
+
 ### OpenAI STT provider
 
 Set `STT_PROVIDER=openai` to use OpenAI STT instead of Gladia.

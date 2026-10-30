@@ -9,6 +9,13 @@ import numpy as np
 from livekit import rtc
 from livekit.agents import stt
 
+from metrics import (
+    SESSION_END_AUDIO_ENDED,
+    SESSION_END_ERROR,
+    SESSION_FAILURE_NO_AUDIO_TRACK,
+    SESSION_FAILURE_PARTICIPANT_NOT_FOUND,
+    SttMetrics,
+)
 from providers.base import BaseSttAgent, BaseSttConfig
 
 # Energy-based voice activity detection parameters.
@@ -35,8 +42,10 @@ openai_config = OpenAiConfig()
 
 
 class OpenAiSttAgent(BaseSttAgent):
-    def __init__(self, config: OpenAiConfig):
-        super().__init__(config)
+    provider_name = "openai"
+
+    def __init__(self, config: OpenAiConfig, metrics: SttMetrics | None = None):
+        super().__init__(config, metrics)
         self._http_session: aiohttp.ClientSession | None = None
 
     # --- HTTP session management ---
@@ -80,15 +89,13 @@ class OpenAiSttAgent(BaseSttAgent):
         """Not used: REST mode overrides start_transcription_for_user directly."""
         raise NotImplementedError("OpenAI REST mode does not use STT streams")
 
-    def _update_stream_locale(self, user_id: str, locale: str):
-        """Restart the pipeline with the new locale."""
-        provider = self.participant_settings.get(user_id, {}).get("provider", "openai")
-        self.stop_transcription_for_user(user_id)
-        self.start_transcription_for_user(user_id, locale, provider)
-
     # --- Override start_transcription_for_user to pass language, not a stream ---
 
     def start_transcription_for_user(self, user_id: str, locale: str, provider: str):
+        if self._shutdown.is_set():
+            # See BaseSttAgent.start_transcription_for_user.
+            return
+
         settings = self.participant_settings.setdefault(user_id, {})
         settings["locale"] = locale
         settings["provider"] = provider
@@ -98,6 +105,9 @@ class OpenAiSttAgent(BaseSttAgent):
             logging.error(
                 f"Cannot start transcription, participant {user_id} not found."
             )
+            self.metrics.session_start_failed(
+                self.provider_name, SESSION_FAILURE_PARTICIPANT_NOT_FOUND
+            )
             return
 
         track = self._find_audio_track(participant)
@@ -105,19 +115,29 @@ class OpenAiSttAgent(BaseSttAgent):
             logging.warning(
                 f"Won't start transcription yet, no audio track found for {user_id}."
             )
+            self.metrics.session_start_failed(
+                self.provider_name, SESSION_FAILURE_NO_AUDIO_TRACK
+            )
             return
 
         if participant.identity in self.processing_info:
             logging.debug(
                 f"Transcription task already running for {participant.identity}, ignoring start command."
             )
+            # A no-op, not a failure: nothing to record.
             return
 
         language = self._sanitize_locale(locale)
-        task = asyncio.create_task(
-            self._run_transcription_pipeline(participant, track, language)
+        task = self._spawn_pipeline(
+            self._run_transcription_pipeline(participant, track, language, locale)
         )
-        self.processing_info[participant.identity] = {"task": task}
+        self.processing_info[participant.identity] = {
+            "task": task,
+            "track_sid": track.sid,
+            # See BaseSttAgent.start_transcription_for_user.
+            "metrics_locale": locale,
+        }
+        self.metrics.session_started(self.provider_name, locale)
         logging.info(
             f"Started transcription for {participant.identity} with locale {locale}."
         )
@@ -137,6 +157,7 @@ class OpenAiSttAgent(BaseSttAgent):
         participant: rtc.RemoteParticipant,
         track: rtc.Track,
         language: str | None,
+        locale: str,
     ):
         """Collect audio, segment by silence, and transcribe via REST API.
 
@@ -151,9 +172,12 @@ class OpenAiSttAgent(BaseSttAgent):
         openai plugin's stream() directly.  This would unlock lower latency for
         backends that implement the OpenAI Realtime API.
         """
-        audio_stream = rtc.AudioStream(track)
+        audio_stream = None
+        info = self.processing_info.get(participant.identity)
+        if info is not None and info["task"] is asyncio.current_task():
+            info["started"] = True
+
         open_time = time.time()
-        self.open_time = open_time
 
         speech_buffer: list[rtc.AudioFrame] = []
         buffer_duration = 0.0
@@ -185,6 +209,7 @@ class OpenAiSttAgent(BaseSttAgent):
                         participant=participant,
                         event=event,
                         open_time=open_time,
+                        locale=locale,
                     )
             except asyncio.CancelledError:
                 raise
@@ -193,7 +218,10 @@ class OpenAiSttAgent(BaseSttAgent):
                     f"Error transcribing segment for {participant.identity}: {e}"
                 )
 
+        end_reason = SESSION_END_ERROR
         try:
+            audio_stream = rtc.AudioStream(track)
+
             async for audio_event in audio_stream:
                 frame = audio_event.frame
                 samples = np.frombuffer(frame.data, dtype=np.int16)
@@ -234,11 +262,12 @@ class OpenAiSttAgent(BaseSttAgent):
 
             # Flush any remaining buffered speech at end of stream.
             await flush_segment(speech_buffer[:], speech_start_time)
+            end_reason = SESSION_END_AUDIO_ENDED
 
         except asyncio.CancelledError:
             logging.info(f"Transcription for {participant.identity} was cancelled.")
         except Exception as e:
             logging.error(f"Error during transcription for track {track.sid}: {e}")
         finally:
-            self.processing_info.pop(participant.identity, None)
-            await audio_stream.aclose()
+            self._release_session_slot(participant.identity, end_reason)
+            await self._close_stream(audio_stream)

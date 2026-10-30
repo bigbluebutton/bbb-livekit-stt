@@ -6,11 +6,50 @@ import pytest
 from livekit import rtc
 from livekit.agents import stt
 
+from prometheus_client import CollectorRegistry
+
+from metrics import (
+    SESSION_FAILURE_NO_AUDIO_TRACK,
+    SESSION_FAILURE_PARTICIPANT_NOT_FOUND,
+    SttMetrics,
+)
 from providers.openai import (
     OpenAiConfig,
     OpenAiSttAgent,
     _SILENCE_THRESHOLD_RMS,
 )
+
+
+class _BlockingStream:
+    """Async iterator that blocks until its input is ended or it is closed.
+
+    Here it stands in for rtc.AudioStream, so a pipeline keeps running until
+    the test stops it.
+    """
+
+    def __init__(self):
+        self.closed = False
+        self._ended = asyncio.Event()
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        await self._ended.wait()
+        raise StopAsyncIteration
+
+    def push_frame(self, frame):
+        pass
+
+    def flush(self):
+        pass
+
+    def end_input(self):
+        self._ended.set()
+
+    async def aclose(self):
+        self.closed = True
+        self._ended.set()
 
 
 def _make_agent(**kwargs):
@@ -32,6 +71,7 @@ def _make_participant(identity, audio_track=None):
     pubs = {}
     if audio_track:
         pub = MagicMock()
+        pub.source = rtc.TrackSource.SOURCE_MICROPHONE
         pub.track = audio_track
         pub.track.kind = rtc.TrackKind.KIND_AUDIO
         pubs["audio"] = pub
@@ -127,7 +167,7 @@ class TestStartTranscriptionForUser:
             agent.start_transcription_for_user("user_1", "pt-BR", "openai")
             await asyncio.sleep(0)
 
-        mock_pipeline.assert_called_once_with(participant, mock_track, "pt")
+        mock_pipeline.assert_called_once_with(participant, mock_track, "pt", "pt-BR")
         agent.processing_info.pop("user_1", None)
 
     async def test_processing_info_has_no_stream_key(self):
@@ -156,10 +196,16 @@ class TestRunTranscriptionPipeline:
         mock_audio_stream = AsyncMock()
         mock_audio_stream.__aiter__.side_effect = asyncio.CancelledError
 
-        agent.processing_info["user_1"] = {"task": MagicMock()}
+        # The keys the pipeline's cleanup reads; see _release_session_slot().
+        agent.processing_info["user_1"] = {
+            "task": asyncio.current_task(),
+            "metrics_locale": "en-US",
+        }
 
         with patch("providers.openai.rtc.AudioStream", return_value=mock_audio_stream):
-            await agent._run_transcription_pipeline(mock_participant, mock_track, "en")
+            await agent._run_transcription_pipeline(
+                mock_participant, mock_track, "en", "en-US"
+            )
 
         assert "user_1" not in agent.processing_info
 
@@ -182,7 +228,7 @@ class TestRunTranscriptionPipeline:
         with patch("providers.openai.rtc.AudioStream", return_value=mock_audio_stream):
             with patch("providers.openai.rtc.combine_audio_frames"):
                 await agent._run_transcription_pipeline(
-                    mock_participant, mock_track, "en"
+                    mock_participant, mock_track, "en", "en-US"
                 )
             await asyncio.sleep(0)
 
@@ -210,7 +256,7 @@ class TestRunTranscriptionPipeline:
         with patch("providers.openai.rtc.AudioStream", return_value=mock_audio_stream):
             with patch("providers.openai.rtc.combine_audio_frames"):
                 await agent._run_transcription_pipeline(
-                    mock_participant, mock_track, "en"
+                    mock_participant, mock_track, "en", "en-US"
                 )
 
         assert len(emitted) == 0
@@ -229,7 +275,9 @@ class TestRunTranscriptionPipeline:
         agent._transcribe_wav = AsyncMock()
 
         with patch("providers.openai.rtc.AudioStream", return_value=mock_audio_stream):
-            await agent._run_transcription_pipeline(mock_participant, mock_track, "en")
+            await agent._run_transcription_pipeline(
+                mock_participant, mock_track, "en", "en-US"
+            )
 
         agent._transcribe_wav.assert_not_called()
 
@@ -243,10 +291,16 @@ class TestRunTranscriptionPipeline:
         mock_audio_stream = AsyncMock()
         mock_audio_stream.__aiter__.side_effect = RuntimeError("boom")
 
-        agent.processing_info["user_1"] = {"task": MagicMock()}
+        # The keys the pipeline's cleanup reads; see _release_session_slot().
+        agent.processing_info["user_1"] = {
+            "task": asyncio.current_task(),
+            "metrics_locale": "en-US",
+        }
 
         with patch("providers.openai.rtc.AudioStream", return_value=mock_audio_stream):
-            await agent._run_transcription_pipeline(mock_participant, mock_track, "en")
+            await agent._run_transcription_pipeline(
+                mock_participant, mock_track, "en", "en-US"
+            )
 
         assert "user_1" not in agent.processing_info
 
@@ -268,7 +322,7 @@ class TestRunTranscriptionPipeline:
         with patch("providers.openai.rtc.AudioStream", return_value=mock_audio_stream):
             with patch("providers.openai.rtc.combine_audio_frames"):
                 await agent._run_transcription_pipeline(
-                    mock_participant, mock_track, "en"
+                    mock_participant, mock_track, "en", "en-US"
                 )
             await asyncio.sleep(0)
 
@@ -276,6 +330,193 @@ class TestRunTranscriptionPipeline:
         alt = emitted[0]["event"].alternatives[0]
         assert alt.start_time >= 0.0
         assert alt.end_time >= alt.start_time
+
+
+class TestSessionSlotOwnership:
+    async def test_restarting_within_one_loop_turn_keeps_the_new_session(self):
+        """The REST pipeline clears its own slot on the way out; a session that
+        replaced it while it was being cancelled must survive."""
+        mock_track = MagicMock()
+        mock_track.kind = rtc.TrackKind.KIND_AUDIO
+        participant = _make_participant("user_1", audio_track=mock_track)
+        agent = _make_agent_with_room(participants={"p": participant})
+
+        with patch(
+            "providers.openai.rtc.AudioStream",
+            side_effect=lambda *_, **__: _BlockingStream(),
+        ):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "openai")
+            first = agent.processing_info["user_1"]["task"]
+
+            # Let the pipeline actually start, so its cancellation later has a
+            # try/finally to unwind.
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+            agent.handle_speech_locale_change("user_1", "", "")
+            agent.handle_speech_locale_change("user_1", "pt-BR", "openai")
+            second = agent.processing_info["user_1"]["task"]
+
+            for _ in range(5):
+                await asyncio.sleep(0)
+
+            assert agent.processing_info.get("user_1", {}).get("task") is second
+
+            for task in (first, second):
+                task.cancel()
+            await asyncio.gather(first, second, return_exceptions=True)
+
+    async def test_changing_locale_while_running_keeps_the_new_session(self):
+        """OpenAI changes locale by restarting the pipeline: the cancelled one
+        must not evict the replacement that already took the slot."""
+        mock_track = MagicMock()
+        mock_track.kind = rtc.TrackKind.KIND_AUDIO
+        participant = _make_participant("user_1", audio_track=mock_track)
+        agent = _make_agent_with_room(participants={"p": participant})
+
+        with patch(
+            "providers.openai.rtc.AudioStream",
+            side_effect=lambda *_, **__: _BlockingStream(),
+        ):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "openai")
+            first = agent.processing_info["user_1"]["task"]
+
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+            agent.handle_speech_locale_change("user_1", "en-US", "openai")
+            second = agent.processing_info["user_1"]["task"]
+
+            for _ in range(5):
+                await asyncio.sleep(0)
+
+            assert second is not first
+            assert agent.processing_info.get("user_1", {}).get("task") is second
+            assert agent.participant_settings["user_1"]["locale"] == "en-US"
+
+            for task in (first, second):
+                task.cancel()
+            await asyncio.gather(first, second, return_exceptions=True)
+
+
+class TestOpenAiSessionAccounting:
+    async def test_gauge_returns_to_zero_when_the_pipeline_raises(self):
+        """When the REST pipeline fails on its own, no stop call runs, so the
+        pipeline must return the session gauge itself."""
+
+        class DyingStream:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                await asyncio.sleep(0)
+                raise RuntimeError("transcription backend unreachable")
+
+            async def aclose(self):
+                pass
+
+        registry = CollectorRegistry()
+        config = OpenAiConfig(api_key="fake-key")
+        agent = OpenAiSttAgent(config, metrics=SttMetrics(registry))
+        agent.room = MagicMock()
+        agent.room.remote_participants = {"p": _openai_participant(with_track=True)}
+
+        with patch("providers.openai.rtc.AudioStream", return_value=DyingStream()):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "openai")
+            task = agent.processing_info["user_1"]["task"]
+            await asyncio.gather(task, return_exceptions=True)
+
+        assert "user_1" not in agent.processing_info
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_active_sessions", {"provider": "openai", "language": "pt"}
+            )
+            == 0.0
+        )
+
+    async def test_an_unopenable_audio_stream_leaves_no_session_behind(self):
+        """The REST pipeline opens its own audio stream. A failure there must
+        leave the gauge at zero and must not block a retry."""
+        registry = CollectorRegistry()
+        agent = OpenAiSttAgent(
+            OpenAiConfig(api_key="fake-key"), metrics=SttMetrics(registry)
+        )
+        agent.room = MagicMock()
+        agent.room.remote_participants = {"p": _openai_participant(with_track=True)}
+
+        with patch(
+            "providers.openai.rtc.AudioStream",
+            side_effect=RuntimeError("no such track"),
+        ):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "openai")
+            task = agent.processing_info["user_1"]["task"]
+            await asyncio.gather(task, return_exceptions=True)
+
+            assert "user_1" not in agent.processing_info
+            assert (
+                registry.get_sample_value(
+                    "bbb_stt_active_sessions",
+                    {"provider": "openai", "language": "pt"},
+                )
+                == 0.0
+            )
+
+        with patch(
+            "providers.openai.rtc.AudioStream",
+            side_effect=lambda *_, **__: _BlockingStream(),
+        ):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "openai")
+            assert "user_1" in agent.processing_info
+
+            retry = agent.processing_info["user_1"]["task"]
+            retry.cancel()
+            await asyncio.gather(retry, return_exceptions=True)
+
+    async def test_closes_its_audio_stream_when_the_session_stops(self):
+        """The REST pipeline opens its own audio stream and is the only thing
+        that can release it."""
+        participant = _openai_participant(with_track=True)
+        agent = _make_agent_with_room(participants={"p": participant})
+        audio_stream = _BlockingStream()
+
+        with patch("providers.openai.rtc.AudioStream", return_value=audio_stream):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "openai")
+            task = agent.processing_info["user_1"]["task"]
+
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+            agent.handle_speech_locale_change("user_1", "", "")
+            await asyncio.gather(task, return_exceptions=True)
+
+        assert audio_stream.closed
+
+    async def test_unsubscribing_another_track_leaves_the_session_running(self):
+        """The REST pipeline records its track like the streaming one does."""
+        participant = _openai_participant(with_track=True)
+        screenshare = MagicMock()
+        screenshare.kind = rtc.TrackKind.KIND_AUDIO
+        screenshare.sid = "TR_screen"
+        screen_pub = MagicMock()
+        screen_pub.source = rtc.TrackSource.SOURCE_SCREENSHARE_AUDIO
+        screen_pub.track = screenshare
+        participant.track_publications["screen"] = screen_pub
+
+        agent = _make_agent_with_room(participants={"p": participant})
+
+        with patch(
+            "providers.openai.rtc.AudioStream",
+            side_effect=lambda *_, **__: _BlockingStream(),
+        ):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "openai")
+            task = agent.processing_info["user_1"]["task"]
+
+            agent._on_track_unsubscribed(screenshare, screen_pub, participant)
+
+            assert "user_1" in agent.processing_info
+
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 class TestCleanup:
@@ -332,7 +573,7 @@ class TestAutoLocale:
             agent.start_transcription_for_user("user_1", "auto", "openai")
             await asyncio.sleep(0)
 
-        mock_pipeline.assert_called_once_with(participant, mock_track, None)
+        mock_pipeline.assert_called_once_with(participant, mock_track, None, "auto")
         agent.processing_info.pop("user_1", None)
 
     async def test_transcribe_wav_omits_the_language_field(self):
@@ -364,8 +605,146 @@ class TestAutoLocale:
 
         with patch("providers.openai.rtc.AudioStream", return_value=mock_audio_stream):
             with patch("providers.openai.rtc.combine_audio_frames"):
-                await agent._run_transcription_pipeline(participant, MagicMock(), None)
+                await agent._run_transcription_pipeline(
+                    participant, MagicMock(), None, "auto"
+                )
             await asyncio.sleep(0)
 
         assert len(emitted) == 1
         assert emitted[0]["event"].alternatives[0].language is None
+
+
+def _make_metered_openai_agent():
+    registry = CollectorRegistry()
+    agent = OpenAiSttAgent(
+        OpenAiConfig(api_key="fake-key"), metrics=SttMetrics(registry)
+    )
+    return agent, registry
+
+
+def _openai_participant(identity="user_1", with_track=False):
+    participant = MagicMock(spec=rtc.RemoteParticipant)
+    participant.identity = identity
+    pubs = {}
+    if with_track:
+        track = MagicMock()
+        track.kind = rtc.TrackKind.KIND_AUDIO
+        publication = MagicMock()
+        publication.source = rtc.TrackSource.SOURCE_MICROPHONE
+        publication.track = track
+        pubs["t"] = publication
+    participant.track_publications = pubs
+    return participant
+
+
+class TestProviderCapabilities:
+    def test_provider_name(self):
+        agent, _ = _make_metered_openai_agent()
+        assert agent.provider_name == "openai"
+
+    def test_does_not_report_confidence(self):
+        """OpenAI's SpeechData omits confidence, leaving it at 0.0."""
+        agent, _ = _make_metered_openai_agent()
+        assert agent.reports_confidence is False
+
+
+class TestOpenAiSessionMetrics:
+    def test_records_participant_not_found(self):
+        agent, registry = _make_metered_openai_agent()
+        agent.room = MagicMock()
+        agent.room.remote_participants = {}
+
+        agent.start_transcription_for_user("ghost", "en-US", "openai")
+
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_session_start_failures_total",
+                {
+                    "provider": "openai",
+                    "reason": SESSION_FAILURE_PARTICIPANT_NOT_FOUND,
+                },
+            )
+            == 1.0
+        )
+
+    def test_records_no_audio_track(self):
+        agent, registry = _make_metered_openai_agent()
+        agent.room = MagicMock()
+        agent.room.remote_participants = {"p": _openai_participant()}
+
+        agent.start_transcription_for_user("user_1", "en-US", "openai")
+
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_session_start_failures_total",
+                {"provider": "openai", "reason": SESSION_FAILURE_NO_AUDIO_TRACK},
+            )
+            == 1.0
+        )
+
+    async def test_locale_change_moves_the_gauge_via_restart(self):
+        """OpenAI changes locale by restarting the pipeline, so the stop and
+        start paths move the gauge."""
+        agent, registry = _make_metered_openai_agent()
+        agent.room = MagicMock()
+        agent.room.remote_participants = {
+            "p": _openai_participant(with_track=True),
+        }
+
+        with patch("providers.openai.rtc.AudioStream"):
+            agent.start_transcription_for_user("user_1", "en-US", "openai")
+            agent.update_locale_for_user("user_1", "pt-BR")
+
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_active_sessions", {"provider": "openai", "language": "en"}
+            )
+            == 0.0
+        )
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_active_sessions", {"provider": "openai", "language": "pt"}
+            )
+            == 1.0
+        )
+
+
+class TestShutdownRefusesNewSessions:
+    def test_no_session_starts_once_shutdown_begins(self):
+        mock_track = MagicMock()
+        mock_track.kind = rtc.TrackKind.KIND_AUDIO
+        participant = _make_participant("user_1", audio_track=mock_track)
+        agent = _make_agent_with_room(participants={"pid": participant})
+        agent._shutdown.set()
+
+        agent.start_transcription_for_user("user_1", "en-US", "openai")
+
+        assert "user_1" not in agent.processing_info
+
+
+class TestSessionEnds:
+    async def test_the_audio_running_out_ends_as_audio_ended(self):
+        registry = CollectorRegistry()
+        agent = OpenAiSttAgent(
+            OpenAiConfig(api_key="fake-key"), metrics=SttMetrics(registry)
+        )
+        mock_track = MagicMock()
+        mock_track.kind = rtc.TrackKind.KIND_AUDIO
+        agent.room = MagicMock()
+        agent.room.remote_participants = {
+            "p": _make_participant("user_1", audio_track=mock_track)
+        }
+        audio_stream = AsyncMock()
+        audio_stream.__aiter__.return_value = iter([])
+
+        with patch("providers.openai.rtc.AudioStream", return_value=audio_stream):
+            agent.start_transcription_for_user("user_1", "en-US", "openai")
+            await agent.processing_info["user_1"]["task"]
+
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_session_ends_total",
+                {"provider": "openai", "reason": "audio_ended"},
+            )
+            == 1.0
+        )
