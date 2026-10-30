@@ -11,6 +11,7 @@ class RedisManager:
     UPDATE_TRANSCRIPT_PUB_MSG = "UpdateTranscriptPubMsg"
     USER_SPEECH_LOCALE_CHANGED_EVT_MSG = "UserSpeechLocaleChangedEvtMsg"
     USER_SPEECH_OPTIONS_CHANGED_EVT_MSG = "UserSpeechOptionsChangedEvtMsg"
+    USER_LEFT_MEETING_EVT_MSG = "UserLeftMeetingEvtMsg"
     TO_AKKA_APPS_CHANNEL = "to-akka-apps-redis-channel"
     FROM_AKKA_APPS_CHANNEL = "from-akka-apps-redis-channel"
 

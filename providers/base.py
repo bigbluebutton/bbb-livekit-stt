@@ -130,6 +130,15 @@ class BaseSttAgent(EventEmitter, ABC):
             info["task"].cancel()
             logging.info(f"Stopped transcription for user {user_id}.")
 
+    def disable_transcription_for_user(self, user_id: str):
+        """Stop transcription and forget the user's locale, so a reconnect does not
+        start it again. Speech options stay: the client sends them when it mounts and
+        when the user changes them, not on a reconnect."""
+        self.stop_transcription_for_user(user_id)
+        settings = self.participant_settings.get(user_id, {})
+        settings.pop("locale", None)
+        settings.pop("provider", None)
+
     def update_locale_for_user(self, user_id: str, locale: str):
         if user_id in self.participant_settings:
             self.participant_settings[user_id]["locale"] = locale
@@ -183,7 +192,8 @@ class BaseSttAgent(EventEmitter, ABC):
             f"Participant {participant.identity} disconnected, stopping transcription."
         )
         self.stop_transcription_for_user(participant.identity)
-        self.participant_settings.pop(participant.identity, None)
+        # Settings stay until BBB removes the user: BBB announces a speech locale only
+        # when it is set, not when the user reconnects.
 
     def _on_disconnected(self):
         self._shutdown.set()
