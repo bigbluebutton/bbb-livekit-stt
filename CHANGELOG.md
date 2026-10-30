@@ -29,6 +29,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 * fix: wait for the sessions a shutting-down agent tears down
 * fix: end a session when its provider stream ends first
 * fix: publish each transcript under the locale it was transcribed in
+* fix: warn when the metrics port is set without PROMETHEUS_MULTIPROC_DIR
 * build(docker): add LOG_LEVEL env var to control the container's log level
 * build: declare aiohttp and numpy as direct dependencies
 * build: count main.py in coverage

@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import math
+import os
 
 import nest_asyncio
 from dotenv import load_dotenv
@@ -346,10 +347,25 @@ async def entrypoint(ctx: JobContext):
         await close_redis()
 
 
+def _metrics_worker_kwargs() -> dict:
+    if metrics_config.prometheus_port is None:
+        return {}
+
+    if not os.environ.get("PROMETHEUS_MULTIPROC_DIR"):
+        logging.warning(
+            "BBB_STT_PROMETHEUS_PORT is set without PROMETHEUS_MULTIPROC_DIR: "
+            "/metrics will serve no bbb_stt_* metric, since jobs record them "
+            "in their own processes."
+        )
+
+    return {"prometheus_port": metrics_config.prometheus_port}
+
+
 if __name__ == "__main__":
-    worker_kwargs = {"entrypoint_fnc": entrypoint, "prewarm_fnc": prewarm}
-
-    if metrics_config.prometheus_port is not None:
-        worker_kwargs["prometheus_port"] = metrics_config.prometheus_port
-
-    cli.run_app(WorkerOptions(**worker_kwargs))
+    cli.run_app(
+        WorkerOptions(
+            entrypoint_fnc=entrypoint,
+            prewarm_fnc=prewarm,
+            **_metrics_worker_kwargs(),
+        )
+    )

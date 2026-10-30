@@ -379,3 +379,29 @@ class TestJobShutdown:
 
             await asyncio.wait_for(task, timeout=2)
             aclose.assert_awaited_once()
+
+
+class TestMetricsWorkerOptions:
+    def test_no_port_means_no_listener(self, monkeypatch):
+        monkeypatch.setattr(main.metrics_config, "prometheus_port", None)
+        assert main._metrics_worker_kwargs() == {}
+
+    def test_port_with_a_multiprocess_dir(self, monkeypatch, caplog):
+        monkeypatch.setattr(main.metrics_config, "prometheus_port", 8082)
+        monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", "/tmp/prometheus-multiproc")
+
+        assert main._metrics_worker_kwargs() == {"prometheus_port": 8082}
+        assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+    def test_port_without_a_multiprocess_dir_warns(self, monkeypatch, caplog):
+        """Every bbb_stt_* metric is recorded in a job process and reaches the
+        worker's /metrics only through the multiprocess directory."""
+        monkeypatch.setattr(main.metrics_config, "prometheus_port", 8082)
+        monkeypatch.delenv("PROMETHEUS_MULTIPROC_DIR", raising=False)
+
+        assert main._metrics_worker_kwargs() == {"prometheus_port": 8082}
+        assert any(
+            "PROMETHEUS_MULTIPROC_DIR" in r.getMessage()
+            for r in caplog.records
+            if r.levelname == "WARNING"
+        )
