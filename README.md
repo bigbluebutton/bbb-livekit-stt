@@ -147,6 +147,7 @@ load, child process count).
 | `bbb_stt_active_agents` | Gauge | `provider` | Running agents, one per room job |
 | `bbb_stt_session_starts_total` | Counter | `provider` | Sessions successfully started |
 | `bbb_stt_session_start_failures_total` | Counter | `provider`, `reason` | Sessions that could not be established |
+| `bbb_stt_session_ends_total` | Counter | `provider`, `reason` | Sessions that ended: `stopped`, `provider_closed`, `audio_ended` or `error` |
 | `bbb_stt_agent_start_failures_total` | Counter | `provider`, `reason` | Agents that could not be established |
 | `bbb_stt_transcripts_total` | Counter | `provider`, `event_type` | Transcripts that passed filtering and were sent to BBB |
 | `bbb_stt_transcripts_discarded_total` | Counter | `provider`, `event_type`, `reason` | Transcripts dropped before publication |
@@ -179,11 +180,18 @@ Caveats worth knowing:
   series.
 - **A locale change restarts the participant's session.** It appears as a stop
   and a start: `bbb_stt_session_starts_total` advances and the session gauge moves
-  between language labels. A change the provider cannot honour therefore shows up as
-  a `bbb_stt_session_start_failures_total` tick, not as a session left running in
-  the old locale.
-- `bbb_stt_transcript_confidence` is only populated for Gladia as of now. Providers
-  that do not report transcript confidence (e.g.: OpenAI) do not populate this histogram.
+  between language labels.
+- **A provider can reject a session after accepting it.** Gladia checks the
+  language only once its stream runs. A locale it cannot honour starts a session
+  that ends with `bbb_stt_session_ends_total{reason="error"}`.
+- **Voxtral gives up on a server that keeps refusing sessions.** A refusal is a
+  WebSocket that opens, then closes or sends another event than
+  `session.created`. A refusal 10 minutes after an earlier one, with no session
+  started since, ends the session with `reason="error"`.
+- **Voxtral and OpenAI ride out outages.** Voxtral retries forever when a
+  connection fails to open, as on a 502. It does the same when the WebSocket
+  opens but no event arrives within 10 s, or when a started session drops.
+  OpenAI logs a failed segment and moves on.
 
 ### OpenAI STT provider
 

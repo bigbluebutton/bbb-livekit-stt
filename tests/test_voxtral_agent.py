@@ -2,6 +2,8 @@ import asyncio
 import base64
 import json
 import logging
+import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
@@ -19,6 +21,7 @@ from metrics import (
     SttMetrics,
 )
 from providers.voxtral_realtime import (
+    _HANDSHAKE_GIVE_UP_S,
     VoxtralRealtimeConfig,
     VoxtralRealtimeSttAgent,
     _AudioNormalizer,
@@ -2041,6 +2044,12 @@ class TestSessionGaugeOnSelfEnd:
     """A pipeline that ends on its own decrements its gauge through
     _release_session_slot(), as the base and OpenAI pipelines do."""
 
+    def _ended(self, registry, reason):
+        return registry.get_sample_value(
+            "bbb_stt_session_ends_total",
+            {"provider": "voxtral-realtime", "reason": reason},
+        )
+
     def _gauge(self, registry):
         return registry.get_sample_value(
             "bbb_stt_active_sessions",
@@ -2071,6 +2080,7 @@ class TestSessionGaugeOnSelfEnd:
 
         assert "user_1" not in agent.processing_info
         assert self._gauge(registry) == 0.0
+        assert self._ended(registry, "error") == 1.0
 
     async def test_audio_stream_failure_returns_the_gauge(self):
         agent, registry = _make_metered_agent({"p": _make_participant("user_1")})
@@ -2084,6 +2094,161 @@ class TestSessionGaugeOnSelfEnd:
         assert task.exception() is None
         assert "user_1" not in agent.processing_info
         assert self._gauge(registry) == 0.0
+
+    @pytest.mark.parametrize(
+        "vad_loop_error", [None, ValueError("server sent garbage")]
+    )
+    async def test_the_slot_is_released_before_the_teardown_awaits(
+        self, vad_loop_error
+    ):
+        """The slot is released before the WebSocket and the audio stream close.
+        A stop during those awaits would otherwise record the end as stopped
+        and cancel the teardown."""
+        agent, registry = _make_metered_agent({"p": _make_participant("user_1")})
+        seen = {}
+
+        context = AsyncMock()
+        context.__aenter__ = AsyncMock(
+            return_value=_ScriptedWs([_text_ws_msg({"type": "session.created"})])
+        )
+
+        async def on_ws_exit(*_):
+            seen["ws_close"] = "user_1" in agent.processing_info
+            return False
+
+        context.__aexit__ = AsyncMock(side_effect=on_ws_exit)
+        agent._http_session = MagicMock()
+        agent._http_session.ws_connect = MagicMock(return_value=context)
+
+        audio_stream = AsyncMock()
+        audio_stream.__aiter__.return_value = iter([])
+
+        async def on_audio_close():
+            seen["audio_close"] = "user_1" in agent.processing_info
+
+        audio_stream.aclose = AsyncMock(side_effect=on_audio_close)
+
+        if vad_loop_error is not None:
+            agent._vad_loop = AsyncMock(side_effect=vad_loop_error)
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream", return_value=audio_stream
+        ):
+            await self._start_and_wait(agent)
+
+        assert seen == {"ws_close": False, "audio_close": False}
+        reason = "audio_ended" if vad_loop_error is None else "error"
+        assert self._ended(registry, reason) == 1.0
+
+    def _connections(self, agent, first_messages):
+        """Build one WebSocket per first message. Each records, when it closes,
+        whether user_1 is still in processing_info."""
+        held = []
+
+        def connection(first_message):
+            context = AsyncMock()
+            context.__aenter__ = AsyncMock(return_value=_ScriptedWs([first_message]))
+
+            async def on_exit(*_):
+                held.append("user_1" in agent.processing_info)
+                return False
+
+            context.__aexit__ = AsyncMock(side_effect=on_exit)
+            return context
+
+        agent._http_session = MagicMock()
+        agent._http_session.ws_connect = MagicMock(
+            side_effect=[connection(m) for m in first_messages]
+        )
+        return held
+
+    @staticmethod
+    def _audio_stream():
+        audio_stream = AsyncMock()
+        audio_stream.__aiter__.return_value = iter([])
+        audio_stream.aclose = AsyncMock()
+        return audio_stream
+
+    async def test_a_transport_error_keeps_the_session_and_reconnects(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr("providers.voxtral_realtime._RETRY_DELAY_INITIAL_S", 0)
+        agent, registry = _make_metered_agent({"p": _make_participant("user_1")})
+        created = _text_ws_msg({"type": "session.created"})
+        held = self._connections(agent, [created, created])
+        agent._vad_loop = AsyncMock(side_effect=[TimeoutError(), None])
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream",
+            return_value=self._audio_stream(),
+        ):
+            await self._start_and_wait(agent)
+
+        assert held == [True, False]
+        assert self._ended(registry, "audio_ended") == 1.0
+        assert self._ended(registry, "error") is None
+
+    async def test_a_handshake_give_up_releases_before_the_ws_closes(self, monkeypatch):
+        monkeypatch.setattr("providers.voxtral_realtime._HANDSHAKE_GIVE_UP_S", 0.0)
+        agent, registry = _make_metered_agent({"p": _make_participant("user_1")})
+        held = self._connections(agent, [_binary_ws_msg()])
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream",
+            return_value=self._audio_stream(),
+        ):
+            await self._start_and_wait(agent)
+
+        assert held == [False]
+        assert self._ended(registry, "error") == 1.0
+
+    async def test_a_handshake_error_before_the_give_up_keeps_the_session(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr("providers.voxtral_realtime._RETRY_DELAY_INITIAL_S", 0)
+        agent, registry = _make_metered_agent({"p": _make_participant("user_1")})
+        created = _text_ws_msg({"type": "session.created"})
+        held = self._connections(agent, [_binary_ws_msg(), created])
+        agent._vad_loop = AsyncMock(return_value=None)
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream",
+            return_value=self._audio_stream(),
+        ):
+            await self._start_and_wait(agent)
+
+        assert held == [True, False]
+        assert self._ended(registry, "audio_ended") == 1.0
+        assert self._ended(registry, "error") is None
+
+    async def test_a_successful_handshake_restarts_the_give_up_window(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr("providers.voxtral_realtime._RETRY_DELAY_INITIAL_S", 0)
+        # Module-local: patching time.monotonic itself would move asyncio's clock.
+        clock = SimpleNamespace(monotonic=lambda: now, time=time.time)
+        monkeypatch.setattr("providers.voxtral_realtime.time", clock)
+        now = 0.0
+        agent, registry = _make_metered_agent({"p": _make_participant("user_1")})
+        created = _text_ws_msg({"type": "session.created"})
+        self._connections(agent, [_binary_ws_msg(), created, _binary_ws_msg(), created])
+
+        async def vad_loop(*_):
+            nonlocal now
+            if now == 0.0:
+                now = 2 * _HANDSHAKE_GIVE_UP_S
+                raise TimeoutError()
+
+        agent._vad_loop = vad_loop
+
+        with patch(
+            "providers.voxtral_realtime.rtc.AudioStream",
+            return_value=self._audio_stream(),
+        ):
+            await self._start_and_wait(agent)
+
+        assert self._ended(registry, "audio_ended") == 1.0
+        assert self._ended(registry, "error") is None
 
 
 class TestTrackScoping:

@@ -13,6 +13,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 * feat: expose Prometheus metrics behind BBB_STT_PROMETHEUS_PORT
 * feat: instrument session lifecycle across the STT providers
 * feat: instrument transcript publication and discards
+* feat: count transcription session ends by reason
 * refactor: extract BaseSttAgent and BaseSttConfig into providers/base.py
 * refactor: move GladiaConfig to providers package, delete old agent module
 * fix: keep a user's speech locale when they reconnect

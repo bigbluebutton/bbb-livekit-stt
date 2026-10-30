@@ -720,3 +720,31 @@ class TestShutdownRefusesNewSessions:
         agent.start_transcription_for_user("user_1", "en-US", "openai")
 
         assert "user_1" not in agent.processing_info
+
+
+class TestSessionEnds:
+    async def test_the_audio_running_out_ends_as_audio_ended(self):
+        registry = CollectorRegistry()
+        agent = OpenAiSttAgent(
+            OpenAiConfig(api_key="fake-key"), metrics=SttMetrics(registry)
+        )
+        mock_track = MagicMock()
+        mock_track.kind = rtc.TrackKind.KIND_AUDIO
+        agent.room = MagicMock()
+        agent.room.remote_participants = {
+            "p": _make_participant("user_1", audio_track=mock_track)
+        }
+        audio_stream = AsyncMock()
+        audio_stream.__aiter__.return_value = iter([])
+
+        with patch("providers.openai.rtc.AudioStream", return_value=audio_stream):
+            agent.start_transcription_for_user("user_1", "en-US", "openai")
+            await agent.processing_info["user_1"]["task"]
+
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_session_ends_total",
+                {"provider": "openai", "reason": "audio_ended"},
+            )
+            == 1.0
+        )

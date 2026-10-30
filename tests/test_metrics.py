@@ -6,6 +6,7 @@ from metrics import (
     EVENT_TYPE_FINAL,
     EVENT_TYPE_INTERIM,
     SESSION_FAILURE_NO_AUDIO_TRACK,
+    SESSION_END_STOPPED,
     SESSION_FAILURE_PARTICIPANT_NOT_FOUND,
     SttMetrics,
     language_label,
@@ -27,6 +28,7 @@ class TestCollectorRegistration:
             "bbb_stt_active_agents",
             "bbb_stt_session_starts_total",
             "bbb_stt_session_start_failures_total",
+            "bbb_stt_session_ends_total",
             "bbb_stt_agent_start_failures_total",
             "bbb_stt_transcripts_total",
             "bbb_stt_transcripts_discarded_total",
@@ -416,3 +418,19 @@ class TestLanguageLabel:
             for sample in metric.samples
         }
         assert languages == {"en", "other"}
+
+
+class TestSessionEnded:
+    def test_counts_the_given_reason(self):
+        registry = CollectorRegistry()
+        metrics = SttMetrics(registry)
+
+        metrics.session_ended("gladia", SESSION_END_STOPPED)
+
+        assert (
+            registry.get_sample_value(
+                "bbb_stt_session_ends_total",
+                {"provider": "gladia", "reason": SESSION_END_STOPPED},
+            )
+            == 1.0
+        )

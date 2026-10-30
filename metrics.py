@@ -25,6 +25,14 @@ SESSION_FAILURE_PARTICIPANT_NOT_FOUND = "participant_not_found"
 SESSION_FAILURE_NO_AUDIO_TRACK = "no_audio_track"
 SESSION_FAILURE_STREAM_ERROR = "stream_error"
 
+# Why a session that did start came to an end.
+SESSION_END_STOPPED = "stopped"
+SESSION_END_PROVIDER_CLOSED = "provider_closed"
+SESSION_END_AUDIO_ENDED = "audio_ended"
+# A provider can reject a session after accepting it. That failure is counted
+# here, not in bbb_stt_session_start_failures_total.
+SESSION_END_ERROR = "error"
+
 AGENT_FAILURE_UNKNOWN_PROVIDER = "unknown_provider"
 AGENT_FAILURE_ROOM_CONNECT = "room_connect_error"
 AGENT_FAILURE_REDIS_CONNECT = "redis_connect_error"
@@ -99,6 +107,12 @@ class SttMetrics:
         self.session_start_failures = Counter(
             "bbb_stt_session_start_failures_total",
             "Transcription sessions that could not be established",
+            ["provider", "reason"],
+            registry=registry,
+        )
+        self.session_ends = Counter(
+            "bbb_stt_session_ends_total",
+            "Transcription sessions that ended, by why they ended",
             ["provider", "reason"],
             registry=registry,
         )
@@ -179,6 +193,9 @@ class SttMetrics:
         self.active_sessions.labels(
             provider=provider, language=language_label(locale)
         ).dec()
+
+    def session_ended(self, provider: str, reason: str) -> None:
+        self.session_ends.labels(provider=provider, reason=reason).inc()
 
     def session_start_failed(self, provider: str, reason: str) -> None:
         self.session_start_failures.labels(provider=provider, reason=reason).inc()

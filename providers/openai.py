@@ -10,6 +10,8 @@ from livekit import rtc
 from livekit.agents import stt
 
 from metrics import (
+    SESSION_END_AUDIO_ENDED,
+    SESSION_END_ERROR,
     SESSION_FAILURE_NO_AUDIO_TRACK,
     SESSION_FAILURE_PARTICIPANT_NOT_FOUND,
     SttMetrics,
@@ -216,6 +218,7 @@ class OpenAiSttAgent(BaseSttAgent):
                     f"Error transcribing segment for {participant.identity}: {e}"
                 )
 
+        end_reason = SESSION_END_ERROR
         try:
             audio_stream = rtc.AudioStream(track)
 
@@ -259,11 +262,12 @@ class OpenAiSttAgent(BaseSttAgent):
 
             # Flush any remaining buffered speech at end of stream.
             await flush_segment(speech_buffer[:], speech_start_time)
+            end_reason = SESSION_END_AUDIO_ENDED
 
         except asyncio.CancelledError:
             logging.info(f"Transcription for {participant.identity} was cancelled.")
         except Exception as e:
             logging.error(f"Error during transcription for track {track.sid}: {e}")
         finally:
-            self._release_session_slot(participant.identity)
+            self._release_session_slot(participant.identity, end_reason)
             await self._close_stream(audio_stream)

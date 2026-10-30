@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from livekit import rtc
-from livekit.agents import stt
+from livekit.agents import DEFAULT_API_CONNECT_OPTIONS, stt
 
 from metrics import (
     AGENT_FAILURE_ROOM_CONNECT,
@@ -906,6 +906,157 @@ class TestSessionAccountingWhenAPipelineDies:
             agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
             assert "user_1" in agent.processing_info
             await _drain(agent.processing_info["user_1"]["task"])
+
+    @staticmethod
+    def _ends(registry, agent):
+        return {
+            sample.labels["reason"]: sample.value
+            for metric in registry.collect()
+            if metric.name == "bbb_stt_session_ends"
+            for sample in metric.samples
+            if sample.name == "bbb_stt_session_ends_total"
+            and sample.labels["provider"] == agent.provider_name
+        }
+
+    async def _session_with(self, stt_stream, audio_stream):
+        class Agent(StubSttAgent):
+            def _create_stt_stream(self, locale):
+                return stt_stream
+
+        registry = CollectorRegistry()
+        agent = Agent(BaseSttConfig(), metrics=SttMetrics(registry))
+        agent.room = MagicMock()
+        agent.room.remote_participants = {"p": _with_audio_track(_stub_participant())}
+        patcher = patch("providers.base.rtc.AudioStream", return_value=audio_stream)
+        patcher.start()
+        agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+        task = agent.processing_info["user_1"]["task"]
+        for _ in range(3):
+            await asyncio.sleep(0)
+        return agent, registry, task, patcher
+
+    async def test_a_stopped_session_ends_as_stopped(self):
+        agent, registry, task, patcher = await self._session_with(
+            _BlockingStream(), _BlockingStream()
+        )
+        agent.handle_speech_locale_change("user_1", "", "")
+        await asyncio.gather(task, return_exceptions=True)
+        patcher.stop()
+
+        assert self._ends(registry, agent) == {"stopped": 1.0}
+
+    async def test_a_provider_closing_first_ends_as_provider_closed(self):
+        stt_stream = _ProviderEndsStream()
+        agent, registry, task, patcher = await self._session_with(
+            stt_stream, _BlockingStream()
+        )
+        stt_stream.ended.set()
+        await asyncio.gather(task, return_exceptions=True)
+        patcher.stop()
+
+        assert self._ends(registry, agent) == {"provider_closed": 1.0}
+
+    async def test_a_provider_error_ends_as_error(self):
+        """A locale the provider rejects is accepted at start and fails in the
+        stream's background task: this is where it shows."""
+        stt_stream = _ProviderEndsStream(ValueError("400 unsupported language"))
+        agent, registry, task, patcher = await self._session_with(
+            stt_stream, _BlockingStream()
+        )
+        stt_stream.ended.set()
+        await asyncio.gather(task, return_exceptions=True)
+        patcher.stop()
+
+        assert self._ends(registry, agent) == {"error": 1.0}
+
+    async def test_the_audio_running_out_ends_as_audio_ended(self):
+        agent, registry, task, patcher = await self._session_with(
+            _BlockingStream(), _EndingStream()
+        )
+        await asyncio.gather(task, return_exceptions=True)
+        patcher.stop()
+
+        assert self._ends(registry, agent) == {"audio_ended": 1.0}
+
+    async def test_a_locale_change_ends_the_old_session_once(self):
+        agent, registry, task, patcher = await self._session_with(
+            _BlockingStream(), _BlockingStream()
+        )
+        agent.handle_speech_locale_change("user_1", "en-US", "gladia")
+        await asyncio.gather(task, return_exceptions=True)
+        agent.stop_transcription_for_user("user_1")
+        await asyncio.sleep(0)
+        patcher.stop()
+
+        assert self._ends(registry, agent) == {"stopped": 2.0}
+
+    @pytest.mark.parametrize(
+        ("audio_frames", "end_delay_turns"), [(None, 0), (6, 0), (5, 4)]
+    )
+    async def test_a_provider_closing_while_audio_flows_ends_as_provider_closed(
+        self, caplog, audio_frames, end_delay_turns
+    ):
+        """With a real RecognizeStream, the provider side closes a few loop
+        turns before the pipeline sees it. A frame or the end of audio arriving
+        then is rejected. That is the provider closing, not an error."""
+
+        class FakeSTT(stt.STT):
+            def __init__(self):
+                super().__init__(
+                    capabilities=stt.STTCapabilities(
+                        streaming=True, interim_results=False
+                    )
+                )
+
+            async def _recognize_impl(self, buffer, *, language, conn_options):
+                raise NotImplementedError
+
+        class ClosesAfterFiveFrames(stt.RecognizeStream):
+            def __init__(self):
+                super().__init__(
+                    stt=FakeSTT(), conn_options=DEFAULT_API_CONNECT_OPTIONS
+                )
+
+            async def _run(self):
+                frames = 0
+                async for item in self._input_ch:
+                    if isinstance(item, rtc.AudioFrame):
+                        frames += 1
+                    if frames >= 5:
+                        return
+
+        class DenseAudio:
+            frame = rtc.AudioFrame(
+                data=b"\x00\x00" * 160,
+                sample_rate=16000,
+                num_channels=1,
+                samples_per_channel=160,
+            )
+            sent = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                await asyncio.sleep(0)
+                if audio_frames is not None and self.sent >= audio_frames:
+                    for _ in range(end_delay_turns):
+                        await asyncio.sleep(0)
+                    raise StopAsyncIteration
+                self.sent += 1
+                return MagicMock(frame=self.frame)
+
+            async def aclose(self):
+                pass
+
+        agent, registry, task, patcher = await self._session_with(
+            ClosesAfterFiveFrames(), DenseAudio()
+        )
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)
+        patcher.stop()
+
+        assert self._ends(registry, agent) == {"provider_closed": 1.0}
+        assert not [r for r in caplog.records if r.levelname == "ERROR"]
 
 
 class TestMicrophoneTrackSelection:

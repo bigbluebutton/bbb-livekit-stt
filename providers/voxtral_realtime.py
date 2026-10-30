@@ -32,6 +32,8 @@ from livekit.agents import vad as agents_vad
 from livekit.plugins import silero
 
 from metrics import (
+    SESSION_END_AUDIO_ENDED,
+    SESSION_END_ERROR,
     SESSION_FAILURE_NO_AUDIO_TRACK,
     SESSION_FAILURE_PARTICIPANT_NOT_FOUND,
     SttMetrics,
@@ -260,6 +262,7 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
         # streak; cleared whenever a handshake succeeds, so a long meeting with
         # occasional reconnects never accumulates its way to the give-up bound.
         handshake_failing_since: float | None = None
+        handshake_gave_up = False
 
         try:
             while True:
@@ -268,50 +271,86 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                     async with self._get_http_session().ws_connect(
                         ws_url, headers=headers, heartbeat=_WS_HEARTBEAT_S
                     ) as ws:
-                        msg = await asyncio.wait_for(ws.receive(), timeout=10.0)
-                        if msg.type != aiohttp.WSMsgType.TEXT:
-                            raise _HandshakeError(
-                                f"expected TEXT for session.created, got {msg.type}"
-                            )
+                        # Exits that end the session release the slot here,
+                        # before the WebSocket and audio stream close. A stop
+                        # while they close would count the session as stopped
+                        # and cancel the teardown.
                         try:
-                            data = json.loads(msg.data)
-                        except (ValueError, TypeError) as e:
-                            raise _HandshakeError(
-                                f"malformed first message: {e}"
-                            ) from e
-                        if data.get("type") != "session.created":
-                            raise _HandshakeError(f"unexpected first message: {data}")
-                        logging.info(
-                            f"Voxtral WS session created for {participant.identity}"
-                        )
-                        # Connection is healthy again; reset reconnect backoff
-                        # and the handshake give-up streak.
-                        retry_delay = _RETRY_DELAY_INITIAL_S
-                        handshake_failing_since = None
+                            msg = await asyncio.wait_for(ws.receive(), timeout=10.0)
+                            if msg.type != aiohttp.WSMsgType.TEXT:
+                                raise _HandshakeError(
+                                    f"expected TEXT for session.created, got {msg.type}"
+                                )
+                            try:
+                                data = json.loads(msg.data)
+                            except (ValueError, TypeError) as e:
+                                raise _HandshakeError(
+                                    f"malformed first message: {e}"
+                                ) from e
+                            if data.get("type") != "session.created":
+                                raise _HandshakeError(
+                                    f"unexpected first message: {data}"
+                                )
+                            logging.info(
+                                f"Voxtral WS session created for {participant.identity}"
+                            )
+                            # Connection is healthy again; reset reconnect backoff
+                            # and the handshake give-up streak.
+                            retry_delay = _RETRY_DELAY_INITIAL_S
+                            handshake_failing_since = None
 
-                        # vLLM expects a FLAT session.update: its handler
-                        # reads event.get("model") off the top level, so
-                        # nesting under "session" fails validation with
-                        # "Missing required field: model" (probe test 6).
-                        # model is also the only field it reads — the
-                        # SessionUpdate model declares nothing else, and the
-                        # server hardcodes temperature=0.0 for every realtime
-                        # generation, which is the greedy decoding the model
-                        # card requires. temperature is sent anyway: it is
-                        # ignored today and correct if the field is ever
-                        # honoured.
-                        await ws.send_json(
-                            {
-                                "type": "session.update",
-                                "model": self.config.model,
-                                "temperature": 0.0,
-                            }
-                        )
+                            # vLLM expects a FLAT session.update: its handler
+                            # reads event.get("model") off the top level, so
+                            # nesting under "session" fails validation with
+                            # "Missing required field: model" (probe test 6).
+                            # model is also the only field it reads — the
+                            # SessionUpdate model declares nothing else, and the
+                            # server hardcodes temperature=0.0 for every realtime
+                            # generation, which is the greedy decoding the model
+                            # card requires. temperature is sent anyway: it is
+                            # ignored today and correct if the field is ever
+                            # honoured.
+                            await ws.send_json(
+                                {
+                                    "type": "session.update",
+                                    "model": self.config.model,
+                                    "temperature": 0.0,
+                                }
+                            )
 
-                        await self._vad_loop(
-                            ws, audio_stream, participant, language, locale, open_time
-                        )
-                        return  # clean exit — audio stream finished normally
+                            await self._vad_loop(
+                                ws,
+                                audio_stream,
+                                participant,
+                                language,
+                                locale,
+                                open_time,
+                            )
+                            self._release_session_slot(
+                                participant.identity, SESSION_END_AUDIO_ENDED
+                            )
+                            return  # clean exit — audio stream finished normally
+                        except (
+                            TimeoutError,
+                            aiohttp.ClientError,
+                            ConnectionResetError,
+                        ):
+                            raise  # reconnected below; the session goes on
+                        except _HandshakeError:
+                            now = time.monotonic()
+                            if handshake_failing_since is None:
+                                handshake_failing_since = now
+                            if now - handshake_failing_since >= _HANDSHAKE_GIVE_UP_S:
+                                handshake_gave_up = True
+                                self._release_session_slot(
+                                    participant.identity, SESSION_END_ERROR
+                                )
+                            raise
+                        except Exception:
+                            self._release_session_slot(
+                                participant.identity, SESSION_END_ERROR
+                            )
+                            raise
 
                 except asyncio.CancelledError:
                     raise
@@ -321,10 +360,7 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                     # participant's transcription for the rest of the meeting:
                     # nothing re-arms the pipeline, because _on_track_subscribed
                     # only fires for a track that is not already subscribed.
-                    now = time.monotonic()
-                    if handshake_failing_since is None:
-                        handshake_failing_since = now
-                    if now - handshake_failing_since >= _HANDSHAKE_GIVE_UP_S:
+                    if handshake_gave_up:
                         logging.error(
                             f"Voxtral WS handshake still failing for "
                             f"{participant.identity} after "
@@ -360,6 +396,7 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                         f"Voxtral Realtime error for {participant.identity}: {e}",
                         exc_info=True,
                     )
+                    self._release_session_slot(participant.identity, SESSION_END_ERROR)
                     return
                 finally:
                     await audio_stream.aclose()
@@ -374,7 +411,8 @@ class VoxtralRealtimeSttAgent(BaseSttAgent):
                 exc_info=True,
             )
         finally:
-            self._release_session_slot(participant.identity)
+            # A no-op when an exit above already released the slot.
+            self._release_session_slot(participant.identity, SESSION_END_ERROR)
 
     async def _vad_loop(
         self,

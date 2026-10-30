@@ -16,6 +16,10 @@ from livekit.agents import (
 from events import EventEmitter
 from metrics import (
     AGENT_FAILURE_ROOM_CONNECT,
+    SESSION_END_AUDIO_ENDED,
+    SESSION_END_ERROR,
+    SESSION_END_PROVIDER_CLOSED,
+    SESSION_END_STOPPED,
     SESSION_FAILURE_NO_AUDIO_TRACK,
     SESSION_FAILURE_PARTICIPANT_NOT_FOUND,
     SESSION_FAILURE_STREAM_ERROR,
@@ -274,6 +278,7 @@ class BaseSttAgent(EventEmitter, ABC):
         info = self.processing_info.pop(user_id)
         info["task"].cancel()
         self.metrics.session_stopped(self.provider_name, info["metrics_locale"])
+        self.metrics.session_ended(self.provider_name, SESSION_END_STOPPED)
 
         # A pipeline cancelled before its first step never runs its own teardown,
         # and the stream it was handed is already connected to the provider. Close
@@ -297,7 +302,7 @@ class BaseSttAgent(EventEmitter, ABC):
         task.add_done_callback(self._pipelines.discard)
         return task
 
-    def _release_session_slot(self, user_id: str):
+    def _release_session_slot(self, user_id: str, end_reason: str):
         """Close out a finished pipeline's own session.
 
         Called from the pipeline task itself. A session that replaced it while
@@ -315,6 +320,7 @@ class BaseSttAgent(EventEmitter, ABC):
 
         del self.processing_info[user_id]
         self.metrics.session_stopped(self.provider_name, info["metrics_locale"])
+        self.metrics.session_ended(self.provider_name, end_reason)
 
     def update_locale_for_user(self, user_id: str, locale: str):
         """Move a participant to a new locale by restarting their session.
@@ -461,16 +467,31 @@ class BaseSttAgent(EventEmitter, ABC):
         # overwritten by the next session to start.
         open_time = time.time()
 
+        input_rejected = False
+
         async def forward_audio_task():
+            nonlocal input_rejected
             try:
                 async for audio_event in audio_stream:
-                    stt_stream.push_frame(audio_event.frame)
+                    try:
+                        stt_stream.push_frame(audio_event.frame)
+                    except RuntimeError:
+                        # The provider closed its side a few turns before the
+                        # pipeline sees it: the stream rejects further audio.
+                        input_rejected = True
+                        return
             finally:
-                # Ends the input, not just flushes it: a recognizer never told
-                # the audio is over keeps the pipeline waiting. Skipped once the
-                # provider side has ended, since the closed stream raises.
-                if process is None or not process.done():
-                    stt_stream.end_input()
+                if process is not None and process.done():
+                    # The provider ended before the audio did.
+                    input_rejected = True
+                elif not input_rejected:
+                    # Ends the input, not just flushes it: a recognizer never
+                    # told the audio is over keeps the pipeline waiting.
+                    try:
+                        stt_stream.end_input()
+                    except RuntimeError:
+                        # The same race as push_frame() above.
+                        input_rejected = True
 
         async def process_stt_task():
             async for event in stt_stream:
@@ -507,6 +528,7 @@ class BaseSttAgent(EventEmitter, ABC):
 
         forward: asyncio.Task | None = None
         process: asyncio.Task | None = None
+        end_reason = SESSION_END_ERROR
 
         try:
             audio_stream = rtc.AudioStream(track)
@@ -521,7 +543,10 @@ class BaseSttAgent(EventEmitter, ABC):
             # while the participant is muted. Then stop forwarding: that leg can
             # wait on a silent microphone forever. When the audio ends first, keep
             # reading: the provider still owes the last transcripts.
-            if process in done:
+            # Left open: end_input() can succeed in the turn before livekit
+            # closes the stream, which counts as audio_ended.
+            provider_ended_first = forward not in done or input_rejected
+            if provider_ended_first:
                 forward.cancel()
 
             # The provider leg first: when both fail, its error is the cause.
@@ -532,6 +557,11 @@ class BaseSttAgent(EventEmitter, ABC):
                     result, asyncio.CancelledError
                 ):
                     raise result
+            end_reason = (
+                SESSION_END_PROVIDER_CLOSED
+                if provider_ended_first
+                else SESSION_END_AUDIO_ENDED
+            )
         except asyncio.CancelledError:
             logging.info(f"Transcription for {participant.identity} was cancelled.")
         except Exception as e:
@@ -539,7 +569,7 @@ class BaseSttAgent(EventEmitter, ABC):
         finally:
             # Before the first await: a stop that arrives while the legs unwind
             # would otherwise cancel this teardown and leave both streams open.
-            self._release_session_slot(participant.identity)
+            self._release_session_slot(participant.identity, end_reason)
 
             legs = [leg for leg in (forward, process) if leg is not None]
             for leg in legs:
