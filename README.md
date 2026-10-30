@@ -143,7 +143,7 @@ load, child process count).
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `bbb_stt_active_sessions` | Gauge | `provider`, `locale` | Active transcription sessions, one per subscribed microphone track |
+| `bbb_stt_active_sessions` | Gauge | `provider`, `language` | Active transcription sessions, one per subscribed microphone track. `language` is the locale's ISO 639-1 code, `auto`, or `other` |
 | `bbb_stt_active_agents` | Gauge | `provider` | Running agents, one per room job |
 | `bbb_stt_session_starts_total` | Counter | `provider` | Sessions successfully started |
 | `bbb_stt_session_start_failures_total` | Counter | `provider`, `reason` | Sessions that could not be established |
@@ -179,7 +179,7 @@ Caveats worth knowing:
   series.
 - **A locale change restarts the participant's session.** It appears as a stop
   and a start: `bbb_stt_session_starts_total` advances and the session gauge moves
-  between locale labels. A change the provider cannot honour therefore shows up as
+  between language labels. A change the provider cannot honour therefore shows up as
   a `bbb_stt_session_start_failures_total` tick, not as a session left running in
   the old locale.
 - `bbb_stt_transcript_confidence` is only populated for Gladia as of now. Providers

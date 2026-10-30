@@ -263,7 +263,7 @@ class TestSessionGauge:
             assert (
                 registry.get_sample_value(
                     "bbb_stt_active_sessions",
-                    {"provider": agent.provider_name, "locale": "en-US"},
+                    {"provider": agent.provider_name, "language": "en"},
                 )
                 == 1.0
             )
@@ -273,7 +273,7 @@ class TestSessionGauge:
         assert (
             registry.get_sample_value(
                 "bbb_stt_active_sessions",
-                {"provider": agent.provider_name, "locale": "en-US"},
+                {"provider": agent.provider_name, "language": "en"},
             )
             == 0.0
         )
@@ -293,14 +293,14 @@ class TestSessionGauge:
         assert (
             registry.get_sample_value(
                 "bbb_stt_active_sessions",
-                {"provider": agent.provider_name, "locale": "en-US"},
+                {"provider": agent.provider_name, "language": "en"},
             )
             == 0.0
         )
         assert (
             registry.get_sample_value(
                 "bbb_stt_active_sessions",
-                {"provider": agent.provider_name, "locale": "pt-BR"},
+                {"provider": agent.provider_name, "language": "pt"},
             )
             is None
         )
@@ -442,7 +442,7 @@ class TestSpeechLocaleChangeDispatch:
         assert (
             registry.get_sample_value(
                 "bbb_stt_active_sessions",
-                {"provider": agent.provider_name, "locale": "pt-BR"},
+                {"provider": agent.provider_name, "language": "pt"},
             )
             == 1.0
         )
@@ -501,7 +501,7 @@ class TestSpeechLocaleChangeDispatch:
         assert (
             registry.get_sample_value(
                 "bbb_stt_active_sessions",
-                {"provider": agent.provider_name, "locale": "pt-BR"},
+                {"provider": agent.provider_name, "language": "pt"},
             )
             == 1.0
         )
@@ -543,14 +543,14 @@ class TestSpeechLocaleChangeDispatch:
             assert (
                 registry.get_sample_value(
                     "bbb_stt_active_sessions",
-                    {"provider": agent.provider_name, "locale": "pt-BR"},
+                    {"provider": agent.provider_name, "language": "pt"},
                 )
                 == 0.0
             )
             assert (
                 registry.get_sample_value(
                     "bbb_stt_active_sessions",
-                    {"provider": agent.provider_name, "locale": "en-US"},
+                    {"provider": agent.provider_name, "language": "en"},
                 )
                 == 1.0
             )
@@ -678,7 +678,7 @@ class TestSpeechLocaleChangeDispatch:
         assert (
             registry.get_sample_value(
                 "bbb_stt_active_sessions",
-                {"provider": agent.provider_name, "locale": "pt-BR"},
+                {"provider": agent.provider_name, "language": "pt"},
             )
             == 0.0
         )
@@ -809,10 +809,10 @@ class TestSessionAccountingWhenAPipelineDies:
 
         return agent, registry
 
-    def _sessions(self, registry, agent, locale="pt-BR"):
+    def _sessions(self, registry, agent, language="pt"):
         return registry.get_sample_value(
             "bbb_stt_active_sessions",
-            {"provider": agent.provider_name, "locale": locale},
+            {"provider": agent.provider_name, "language": language},
         )
 
     async def test_gauge_returns_to_zero_when_the_pipeline_raises(self):
@@ -950,7 +950,7 @@ class TestMicrophoneTrackSelection:
             assert (
                 registry.get_sample_value(
                     "bbb_stt_active_sessions",
-                    {"provider": agent.provider_name, "locale": "pt-BR"},
+                    {"provider": agent.provider_name, "language": "pt"},
                 )
                 == 1.0
             )
@@ -1036,7 +1036,7 @@ class TestStreamTeardown:
         assert (
             registry.get_sample_value(
                 "bbb_stt_active_sessions",
-                {"provider": agent.provider_name, "locale": "pt-BR"},
+                {"provider": agent.provider_name, "language": "pt"},
             )
             == 0.0
         )
@@ -1147,7 +1147,7 @@ class TestStreamTeardown:
         assert (
             registry.get_sample_value(
                 "bbb_stt_active_sessions",
-                {"provider": agent.provider_name, "locale": "pt-BR"},
+                {"provider": agent.provider_name, "language": "pt"},
             )
             == 0.0
         )

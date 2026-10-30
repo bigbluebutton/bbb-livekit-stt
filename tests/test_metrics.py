@@ -8,6 +8,7 @@ from metrics import (
     SESSION_FAILURE_NO_AUDIO_TRACK,
     SESSION_FAILURE_PARTICIPANT_NOT_FOUND,
     SttMetrics,
+    language_label,
 )
 
 
@@ -110,7 +111,7 @@ class TestSessionLifecycle:
 
         assert (
             registry.get_sample_value(
-                "bbb_stt_active_sessions", {"provider": "gladia", "locale": "en-US"}
+                "bbb_stt_active_sessions", {"provider": "gladia", "language": "en"}
             )
             == 1.0
         )
@@ -130,7 +131,7 @@ class TestSessionLifecycle:
 
         assert (
             registry.get_sample_value(
-                "bbb_stt_active_sessions", {"provider": "gladia", "locale": "en-US"}
+                "bbb_stt_active_sessions", {"provider": "gladia", "language": "en"}
             )
             == 0.0
         )
@@ -385,3 +386,33 @@ class TestTranscriptPublishFailed:
             )
             == 1.0
         )
+
+
+class TestLanguageLabel:
+    def test_a_bbb_locale_is_labelled_with_its_language(self):
+        assert language_label("pt-BR") == "pt"
+        assert language_label("EN-us") == "en"
+
+    def test_auto_detection_keeps_its_own_label(self):
+        assert language_label("auto") == "auto"
+
+    def test_anything_outside_iso_639_1_is_other(self):
+        assert language_label("xx-YY") == "other"
+        assert language_label("en<script>") == "other"
+        assert language_label("") == "other"
+
+    def test_locale_changes_cannot_grow_the_series_count(self):
+        registry = CollectorRegistry()
+        metrics = SttMetrics(registry)
+
+        for i in range(200):
+            metrics.session_started("gladia", f"en-x{i:05d}")
+            metrics.session_started("gladia", f"zz-{i:05d}")
+
+        languages = {
+            sample.labels["language"]
+            for metric in registry.collect()
+            if metric.name == "bbb_stt_active_sessions"
+            for sample in metric.samples
+        }
+        assert languages == {"en", "other"}

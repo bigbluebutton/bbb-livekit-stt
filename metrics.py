@@ -33,10 +33,36 @@ DISCARD_LOW_CONFIDENCE = "low_confidence"
 DISCARD_UNRESOLVABLE_LOCALE = "unresolvable_locale"
 DISCARD_BELOW_MIN_UTTERANCE_LENGTH = "below_min_utterance_length"
 
+# The session gauge's language label. The locale comes from BBB unvalidated, so
+# the label is its ISO 639-1 language when it has one, and LANGUAGE_OTHER for
+# anything else.
+LANGUAGE_AUTO = "auto"
+LANGUAGE_OTHER = "other"
+ISO_639_1 = frozenset(
+    """
+    aa ab ae af ak am an ar as av ay az ba be bg bh bi bm bn bo br bs ca ce ch
+    co cr cs cu cv cy da de dv dz ee el en eo es et eu fa ff fi fj fo fr fy ga
+    gd gl gn gu gv ha he hi ho hr ht hu hy hz ia id ie ig ii ik io is it iu ja
+    jv ka kg ki kj kk kl km kn ko kr ks ku kv kw ky la lb lg li ln lo lt lu lv
+    mg mh mi mk ml mn mr ms mt my na nb nd ne ng nl nn no nr nv ny oc oj om or
+    os pa pi pl ps pt qu rm rn ro ru rw sa sc sd se sg si sk sl sm sn so sq sr
+    ss st su sv sw ta te tg th ti tk tl tn to tr ts tt tw ty ug uk ur uz ve vi
+    vo wa wo xh yi yo za zh zu
+    """.split()
+)
+
 # prometheus_client's default buckets are latency-oriented and useless for a
 # [0, 1] score.
 CONFIDENCE_BUCKETS = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
 UTTERANCE_DURATION_BUCKETS = (0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0, 30.0, 60.0)
+
+
+def language_label(locale: str) -> str:
+    """The session gauge's label for a BBB locale such as "pt-BR"."""
+    language = locale.split("-")[0].lower()
+    if language == LANGUAGE_AUTO:
+        return LANGUAGE_AUTO
+    return language if language in ISO_639_1 else LANGUAGE_OTHER
 
 
 class SttMetrics:
@@ -53,7 +79,7 @@ class SttMetrics:
         self.active_sessions = Gauge(
             "bbb_stt_active_sessions",
             "Transcription sessions currently active, one per subscribed microphone track",
-            ["provider", "locale"],
+            ["provider", "language"],
             multiprocess_mode="livesum",
             registry=registry,
         )
@@ -144,11 +170,15 @@ class SttMetrics:
     # --- Session lifecycle ---
 
     def session_started(self, provider: str, locale: str) -> None:
-        self.active_sessions.labels(provider=provider, locale=locale).inc()
+        self.active_sessions.labels(
+            provider=provider, language=language_label(locale)
+        ).inc()
         self.session_starts.labels(provider=provider).inc()
 
     def session_stopped(self, provider: str, locale: str) -> None:
-        self.active_sessions.labels(provider=provider, locale=locale).dec()
+        self.active_sessions.labels(
+            provider=provider, language=language_label(locale)
+        ).dec()
 
     def session_start_failed(self, provider: str, reason: str) -> None:
         self.session_start_failures.labels(provider=provider, reason=reason).inc()

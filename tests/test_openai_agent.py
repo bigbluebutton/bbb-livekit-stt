@@ -429,7 +429,7 @@ class TestOpenAiSessionAccounting:
         assert "user_1" not in agent.processing_info
         assert (
             registry.get_sample_value(
-                "bbb_stt_active_sessions", {"provider": "openai", "locale": "pt-BR"}
+                "bbb_stt_active_sessions", {"provider": "openai", "language": "pt"}
             )
             == 0.0
         )
@@ -456,7 +456,7 @@ class TestOpenAiSessionAccounting:
             assert (
                 registry.get_sample_value(
                     "bbb_stt_active_sessions",
-                    {"provider": "openai", "locale": "pt-BR"},
+                    {"provider": "openai", "language": "pt"},
                 )
                 == 0.0
             )
@@ -697,13 +697,13 @@ class TestOpenAiSessionMetrics:
 
         assert (
             registry.get_sample_value(
-                "bbb_stt_active_sessions", {"provider": "openai", "locale": "en-US"}
+                "bbb_stt_active_sessions", {"provider": "openai", "language": "en"}
             )
             == 0.0
         )
         assert (
             registry.get_sample_value(
-                "bbb_stt_active_sessions", {"provider": "openai", "locale": "pt-BR"}
+                "bbb_stt_active_sessions", {"provider": "openai", "language": "pt"}
             )
             == 1.0
         )

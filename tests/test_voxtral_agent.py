@@ -2025,13 +2025,13 @@ class TestVoxtralSessionMetrics:
         labels = {"provider": "voxtral-realtime"}
         assert (
             registry.get_sample_value(
-                "bbb_stt_active_sessions", {**labels, "locale": "en-US"}
+                "bbb_stt_active_sessions", {**labels, "language": "en"}
             )
             == 0.0
         )
         assert (
             registry.get_sample_value(
-                "bbb_stt_active_sessions", {**labels, "locale": "pt-BR"}
+                "bbb_stt_active_sessions", {**labels, "language": "pt"}
             )
             == 1.0
         )
@@ -2044,7 +2044,7 @@ class TestSessionGaugeOnSelfEnd:
     def _gauge(self, registry):
         return registry.get_sample_value(
             "bbb_stt_active_sessions",
-            {"provider": "voxtral-realtime", "locale": "en-US"},
+            {"provider": "voxtral-realtime", "language": "en"},
         )
 
     async def _start_and_wait(self, agent):
