@@ -12,6 +12,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 * build: name every process in the image bbb-livekit-stt
 * build: compile Python bytecode in the image
 * build: keep livekit-agents below 1.4.5
+* build: copy only the files the agent runs into the image
 
 ## v0.4.0
 
