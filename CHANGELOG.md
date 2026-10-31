@@ -8,6 +8,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 ## UNRELEASED
 
 * fix: import the STT provider before the worker forks job processes
+* build: name every process in the image bbb-livekit-stt
 
 ## v0.4.0
 

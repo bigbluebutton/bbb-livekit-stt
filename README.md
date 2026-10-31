@@ -111,6 +111,17 @@ agent with debug logging:
 docker run --network host --rm -it --env-file .env -e LOG_LEVEL=DEBUG bbb-livekit-stt
 ```
 
+The image's default command names every process in the container
+`bbb-livekit-stt`, job processes included; a command that runs `python3`
+directly does not. process-exporter can group them by that name:
+
+```yaml
+process_names:
+  - name: bbb-livekit-stt
+    comm:
+      - bbb-livekit-stt
+```
+
 Pre-built images are available via GitHub Container Registry as well.
 
 ### Metrics
