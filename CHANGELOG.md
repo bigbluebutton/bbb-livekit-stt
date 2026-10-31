@@ -13,6 +13,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 * build: compile Python bytecode in the image
 * build: keep livekit-agents below 1.4.5
 * build: copy only the files the agent runs into the image
+* build: fail the image build when uv.lock is out of date
 
 ## v0.4.0
 
