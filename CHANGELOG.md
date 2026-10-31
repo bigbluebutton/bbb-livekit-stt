@@ -9,6 +9,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 
 * fix: import the STT provider before the worker forks job processes
 * build: name every process in the image bbb-livekit-stt
+* build: compile Python bytecode in the image
 
 ## v0.4.0
 

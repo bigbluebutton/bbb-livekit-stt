@@ -15,7 +15,9 @@ WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
 
-RUN uv sync --no-cache --active
+# Without precompiled bytecode, each new container compiles every module it
+# imports before the worker can register.
+RUN uv sync --no-cache --active --compile-bytecode
 
 COPY . .
 
