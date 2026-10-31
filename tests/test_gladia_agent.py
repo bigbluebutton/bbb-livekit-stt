@@ -3,6 +3,7 @@ import contextlib
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from livekit import rtc
 from livekit.agents import stt
 from livekit.plugins.gladia import STT as GladiaSTT
@@ -478,6 +479,36 @@ class TestRunTranscriptionPipeline:
             )
 
         assert "user_1" not in agent.processing_info
+
+
+class TestEnergyFilterIsIgnored:
+    def test_the_setting_never_reaches_the_plugin(self):
+        config = GladiaConfig(api_key="fake-key", energy_filter=True)
+        with patch("providers.gladia.GladiaSTT", spec=GladiaSTT) as stt:
+            GladiaSttAgent(config)
+
+        assert "energy_filter" not in stt.call_args.kwargs
+
+    def test_setting_it_logs_a_warning(self, caplog):
+        config = GladiaConfig(api_key="fake-key", energy_filter=True)
+        with (
+            patch("providers.gladia.GladiaSTT", spec=GladiaSTT),
+            caplog.at_level(logging.WARNING),
+        ):
+            GladiaSttAgent(config)
+
+        assert any("GLADIA_ENERGY_FILTER" in r.message for r in caplog.records)
+
+    @pytest.mark.parametrize("value", [None, False])
+    def test_unset_or_false_logs_nothing(self, caplog, value):
+        config = GladiaConfig(api_key="fake-key", energy_filter=value)
+        with (
+            patch("providers.gladia.GladiaSTT", spec=GladiaSTT),
+            caplog.at_level(logging.WARNING),
+        ):
+            GladiaSttAgent(config)
+
+        assert not any("GLADIA_ENERGY_FILTER" in r.message for r in caplog.records)
 
 
 class TestPipelineAudioFormat:

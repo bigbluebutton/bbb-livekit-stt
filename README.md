@@ -59,9 +59,9 @@ Supported STT engines:
 
     Feel free to check `.env.example` for any other configurations of interest.
 
-    **All options ingested by the Gladia STT plugin are exposed via env vars**. The
-    OpenAI provider takes `OPENAI_API_KEY`, `OPENAI_STT_MODEL` and `OPENAI_BASE_URL`
-    (see below).
+    **All options ingested by the Gladia STT plugin are exposed via env vars**,
+    except its energy filter (see `.env.example`). The OpenAI provider takes
+    `OPENAI_API_KEY`, `OPENAI_STT_MODEL` and `OPENAI_BASE_URL` (see below).
 
 ### Running
 

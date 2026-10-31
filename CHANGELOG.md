@@ -8,6 +8,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 ## UNRELEASED
 
 * fix: import the STT provider before the worker forks job processes
+* fix(gladia): ignore GLADIA_ENERGY_FILTER, which ends captions at a pause
 * build: name every process in the image bbb-livekit-stt
 * build: compile Python bytecode in the image
 
