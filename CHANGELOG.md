@@ -5,7 +5,7 @@ Intermediate pre-release changes will only be registered *separately* in their
 respective tag's CHANGELOG.
 Final releases will consolidate all intermediate changes in chronological order.
 
-## UNRELEASED
+## v0.5.0
 
 * fix: import the STT provider before the worker forks job processes
 * fix(gladia): ignore GLADIA_ENERGY_FILTER, which ends captions at a pause
