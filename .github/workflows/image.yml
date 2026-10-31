@@ -1,0 +1,39 @@
+name: Build Docker image
+
+# Runs when a build input or a package's __init__.py changes. A new package
+# that .dockerignore does not list would be missing from the image.
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - pyproject.toml
+      - uv.lock
+      - "**/__init__.py"
+      - .github/workflows/image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v6
+
+      - name: Build the image
+        run: docker build -t bbb-livekit-stt:ci .
+
+      # main loads only the configured provider; import the others too.
+      - name: Import the agent and its providers in the image
+        run: |
+          docker run --rm --entrypoint bbb-livekit-stt bbb-livekit-stt:ci -c '
+          import importlib, pkgutil
+          import main, providers
+          for module in pkgutil.iter_modules(providers.__path__):
+              importlib.import_module(f"providers.{module.name}")
+          '
