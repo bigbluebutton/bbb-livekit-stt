@@ -11,6 +11,7 @@ Final releases will consolidate all intermediate changes in chronological order.
 * fix(gladia): ignore GLADIA_ENERGY_FILTER, which ends captions at a pause
 * build: name every process in the image bbb-livekit-stt
 * build: compile Python bytecode in the image
+* build: keep livekit-agents below 1.4.5
 
 ## v0.4.0
 

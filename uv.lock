@@ -214,7 +214,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = "~=3.12" },
-    { name = "livekit-agents", extras = ["gladia", "silero"], specifier = "~=1.4" },
+    { name = "livekit-agents", extras = ["gladia", "silero"], specifier = ">=1.4,<1.4.5" },
     { name = "numpy", specifier = "~=2.2" },
     { name = "prometheus-client", specifier = "~=0.22" },
     { name = "python-dotenv", specifier = "~=1.1.1" },
