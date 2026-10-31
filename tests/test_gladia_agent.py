@@ -480,6 +480,31 @@ class TestRunTranscriptionPipeline:
         assert "user_1" not in agent.processing_info
 
 
+class TestPipelineAudioFormat:
+    async def test_reads_audio_in_the_format_gladia_sends(self):
+        agent = _make_agent(sample_rate=8000, channels=1)
+        mock_participant = MagicMock(spec=rtc.RemoteParticipant)
+        mock_participant.identity = "user_1"
+        mock_track = MagicMock()
+
+        mock_audio_stream = AsyncMock()
+        mock_audio_stream.__aiter__.return_value = iter([])
+        mock_stt_stream = AsyncMock()
+        mock_stt_stream.end_input = MagicMock()
+        mock_stt_stream.__aiter__.return_value = iter([])
+
+        with patch(
+            "providers.base.rtc.AudioStream", return_value=mock_audio_stream
+        ) as audio_stream:
+            await agent._run_transcription_pipeline(
+                mock_participant, mock_track, mock_stt_stream, "pt-BR"
+            )
+
+        audio_stream.assert_called_once_with(
+            mock_track, sample_rate=8000, num_channels=1, frame_size_ms=100
+        )
+
+
 class TestCleanup:
     async def test_cleanup_stops_all_active_transcriptions(self):
         """_cleanup() should cancel all active tasks."""

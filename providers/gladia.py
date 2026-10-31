@@ -195,6 +195,14 @@ class GladiaSttAgent(BaseSttAgent):
 
         return self.stt.stream(language=locale)
 
+    def _audio_stream_options(self) -> dict:
+        # The plugin sends 100 ms chunks, so 100 ms frames add no delay.
+        return {
+            "sample_rate": self.config.sample_rate,
+            "num_channels": self.config.channels,
+            "frame_size_ms": 100,
+        }
+
     def _should_emit(self, event: stt.SpeechEvent) -> bool:
         if event.type == stt.SpeechEventType.FINAL_TRANSCRIPT:
             min_confidence = self.config.min_confidence_final

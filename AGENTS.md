@@ -140,9 +140,10 @@ fixed pause in its place races the teardown and strands `bbb_stt_active_agents`.
 
 1. Create `providers/<name>.py` with a config dataclass extending `BaseSttConfig`
    and an agent class extending `BaseSttAgent`.
-2. Implement `_create_stt_stream()`; optionally override `_should_emit()` and
-   `translation_lang_map`. The returned stream must accept `end_input()`, called
-   when the audio runs out, and `aclose()`. The pipeline closes it on exit, or
+2. Implement `_create_stt_stream()`; optionally override `_should_emit()`,
+   `translation_lang_map` and `_audio_stream_options()`. The stream
+   `_create_stt_stream()` returns must accept `end_input()`, called when the audio
+   runs out, and `aclose()`. The pipeline closes it on exit, or
    `stop_transcription_for_user()` does if the pipeline never ran.
 
    A locale change is **not** an in-place update: `update_locale_for_user()`
