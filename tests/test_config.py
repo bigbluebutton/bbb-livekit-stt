@@ -111,13 +111,11 @@ class TestGladiaConfigToSttKwargs:
             interim_results=None,
             languages=None,
             code_switching=None,
-            energy_filter=None,
         )
         result = config.to_stt_kwargs()
         assert "interim_results" not in result
         assert "languages" not in result
         assert "code_switching" not in result
-        assert "energy_filter" not in result
 
     def test_includes_non_none_optional_fields(self):
         config = GladiaConfig(

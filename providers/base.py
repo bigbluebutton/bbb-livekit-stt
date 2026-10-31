@@ -95,6 +95,15 @@ class BaseSttAgent(EventEmitter, ABC):
         """
         ...
 
+    def _audio_stream_options(self) -> dict:
+        """Keyword arguments for the rtc.AudioStream that feeds the STT stream.
+
+        The SDK defaults are 48 kHz and 10 ms frames. A provider that asks for
+        the rate and frame size its STT stream sends gets them converted natively.
+        Otherwise its STT stream calls a resampler for every 10 ms frame.
+        """
+        return {}
+
     def _should_emit(self, event: stt.SpeechEvent) -> bool:
         """Filter events before emission. Override for provider-specific filtering."""
         return True
@@ -531,7 +540,7 @@ class BaseSttAgent(EventEmitter, ABC):
         end_reason = SESSION_END_ERROR
 
         try:
-            audio_stream = rtc.AudioStream(track)
+            audio_stream = rtc.AudioStream(track, **self._audio_stream_options())
             forward = asyncio.create_task(forward_audio_task())
             process = asyncio.create_task(process_stt_task())
 

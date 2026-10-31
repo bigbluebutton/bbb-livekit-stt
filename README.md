@@ -59,9 +59,9 @@ Supported STT engines:
 
     Feel free to check `.env.example` for any other configurations of interest.
 
-    **All options ingested by the Gladia STT plugin are exposed via env vars**. The
-    OpenAI provider takes `OPENAI_API_KEY`, `OPENAI_STT_MODEL` and `OPENAI_BASE_URL`
-    (see below).
+    **All options ingested by the Gladia STT plugin are exposed via env vars**,
+    except its energy filter (see `.env.example`). The OpenAI provider takes
+    `OPENAI_API_KEY`, `OPENAI_STT_MODEL` and `OPENAI_BASE_URL` (see below).
 
 ### Running
 
@@ -109,6 +109,17 @@ agent with debug logging:
 
 ```bash
 docker run --network host --rm -it --env-file .env -e LOG_LEVEL=DEBUG bbb-livekit-stt
+```
+
+The image's default command names every process in the container
+`bbb-livekit-stt`, job processes included; a command that runs `python3`
+directly does not. process-exporter can group them by that name:
+
+```yaml
+process_names:
+  - name: bbb-livekit-stt
+    comm:
+      - bbb-livekit-stt
 ```
 
 Pre-built images are available via GitHub Container Registry as well.

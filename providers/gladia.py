@@ -74,6 +74,7 @@ class GladiaConfig(BaseSttConfig):
         )
     )
     region: str | None = field(default_factory=lambda: os.getenv("GLADIA_REGION", None))
+    # Never passed to the plugin: the agent reads it only to log a warning (see GladiaSttAgent).
     energy_filter: bool | None = field(
         default_factory=lambda: _get_bool_env("GLADIA_ENERGY_FILTER", None)
     )
@@ -149,7 +150,6 @@ class GladiaConfig(BaseSttConfig):
             "endpointing": self.endpointing,
             "maximum_duration_without_endpointing": self.maximum_duration_without_endpointing,
             "region": self.region,
-            "energy_filter": self.energy_filter,
             "translation_enabled": self.translation_enabled,
             "translation_target_languages": self.translation_target_languages,
             "translation_model": self.translation_model,
@@ -174,6 +174,14 @@ class GladiaSttAgent(BaseSttAgent):
 
     def __init__(self, config: GladiaConfig, metrics: SttMetrics | None = None):
         super().__init__(config, metrics)
+        if config.energy_filter:
+            # In livekit-plugins-gladia 1.4.2 the filter sends stop_recording
+            # when audio resumes after 1.5 s of quiet, and on Gladia that ends
+            # the session.
+            logging.warning(
+                "GLADIA_ENERGY_FILTER is not supported and is ignored: it ends "
+                "transcription at the speaker's first pause of 1.5 s or longer."
+            )
         self.stt = GladiaSTT(**config.to_stt_kwargs())
 
     @property
@@ -194,6 +202,14 @@ class GladiaSttAgent(BaseSttAgent):
             return self.stt.stream()
 
         return self.stt.stream(language=locale)
+
+    def _audio_stream_options(self) -> dict:
+        # The plugin sends 100 ms chunks, so 100 ms frames add no delay.
+        return {
+            "sample_rate": self.config.sample_rate,
+            "num_channels": self.config.channels,
+            "frame_size_ms": 100,
+        }
 
     def _should_emit(self, event: stt.SpeechEvent) -> bool:
         if event.type == stt.SpeechEventType.FINAL_TRANSCRIPT:

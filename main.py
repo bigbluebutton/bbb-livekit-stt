@@ -6,12 +6,11 @@ import logging
 import math
 import os
 
-import nest_asyncio
 from livekit.agents import JobContext, JobProcess, WorkerOptions, cli, stt
 from livekit import rtc
 
 from redis_manager import RedisManager
-from providers import create_agent, prewarm_provider
+from providers import create_agent, import_provider, prewarm_provider
 from metrics import (
     AGENT_FAILURE_REDIS_CONNECT,
     AGENT_FAILURE_UNKNOWN_PROVIDER,
@@ -34,6 +33,10 @@ from utils import (
     resolve_bbb_locale,
 )
 
+# At module level rather than under __main__: `main.py dev` runs the worker in
+# a child process that imports this file as __mp_main__.
+import_provider(stt_provider)
+
 
 def _log_startup_configuration(stt_config):
     logging.debug(
@@ -49,8 +52,6 @@ def prewarm(proc: JobProcess):
 
 
 async def entrypoint(ctx: JobContext):
-    nest_asyncio.apply()
-
     redis_manager = RedisManager(redis_config)
 
     try:

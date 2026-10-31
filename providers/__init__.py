@@ -1,6 +1,21 @@
 from providers.base import BaseSttAgent, BaseSttConfig as BaseSttConfig
 
 
+def import_provider(provider: str) -> None:
+    """Import a provider's module in the worker's main process.
+
+    LiveKit forks each job process from a forkserver that preloads the plugins
+    registered in the main process. A provider imported only inside the job
+    leaves every new process to import livekit.agents again, about a second of
+    CPU each. The openai provider uses no LiveKit plugin, so nothing is
+    preloaded for it. An unknown provider is ignored, as in prewarm_provider().
+    """
+    if provider == "gladia":
+        import providers.gladia  # noqa: F401
+    elif provider == "voxtral-realtime":
+        import providers.voxtral_realtime  # noqa: F401
+
+
 def prewarm_provider(provider: str, userdata: dict) -> None:
     """Load a provider's slow assets once per worker process.
 
