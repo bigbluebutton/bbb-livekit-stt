@@ -6,7 +6,6 @@ import logging
 import math
 import os
 
-import nest_asyncio
 from livekit.agents import JobContext, JobProcess, WorkerOptions, cli, stt
 from livekit import rtc
 
@@ -53,8 +52,6 @@ def prewarm(proc: JobProcess):
 
 
 async def entrypoint(ctx: JobContext):
-    nest_asyncio.apply()
-
     redis_manager = RedisManager(redis_config)
 
     try:

@@ -129,7 +129,6 @@ async def entrypoint():
         patch.object(RedisManager, "listen", listen),
         patch.object(RedisManager, "aclose", AsyncMock()),
         patch.object(RedisManager, "publish_update_transcript_pub_msg", publish),
-        patch("main.nest_asyncio.apply"),
         patch("main.get_redacted_app_config", return_value={}),
     ):
         task = asyncio.create_task(main.entrypoint(ctx))
@@ -368,7 +367,6 @@ class TestJobShutdown:
             patch.object(RedisManager, "connect", AsyncMock(return_value=True)),
             patch.object(RedisManager, "listen", AsyncMock()),
             patch.object(RedisManager, "aclose", aclose),
-            patch("main.nest_asyncio.apply"),
             patch("main.get_redacted_app_config", return_value={}),
         ):
             task = asyncio.create_task(main.entrypoint(ctx))
@@ -409,7 +407,6 @@ class TestJobShutdown:
             patch.object(RedisManager, "connect", slow_connect),
             patch.object(RedisManager, "listen", listen),
             patch.object(RedisManager, "aclose", AsyncMock()),
-            patch("main.nest_asyncio.apply"),
             patch("main.get_redacted_app_config", return_value={}),
         ):
             task = asyncio.create_task(main.entrypoint(ctx))
@@ -464,7 +461,6 @@ class TestRedisDownAtJobStart:
         with (
             patch("main.create_agent", return_value=agent),
             patch.object(RedisManager, "aclose", aclose),
-            patch("main.nest_asyncio.apply"),
             patch("main.get_redacted_app_config", return_value={}),
         ):
             task = asyncio.create_task(main.entrypoint(ctx))
