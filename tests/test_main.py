@@ -477,16 +477,21 @@ class TestRedisDownAtJobStart:
         aclose.assert_awaited_once()
 
 
+def _copy_app(tmp_path):
+    """Copy the app's modules, so a subprocess runs them away from the repo's .env."""
+    root = os.path.dirname(os.path.abspath(main.__file__))
+    for name in os.listdir(root):
+        if name.endswith(".py"):
+            shutil.copy(os.path.join(root, name), tmp_path)
+    shutil.copytree(os.path.join(root, "providers"), tmp_path / "providers")
+
+
 class TestDotenvIsLoadedFirst:
     def test_settings_in_dotenv_reach_the_config(self, tmp_path):
         """load_env.py says why .env must load before config and
         prometheus_client. Without that, a port set only in .env would be
         silently ignored."""
-        root = os.path.dirname(os.path.abspath(main.__file__))
-        for name in os.listdir(root):
-            if name.endswith(".py"):
-                shutil.copy(os.path.join(root, name), tmp_path)
-        shutil.copytree(os.path.join(root, "providers"), tmp_path / "providers")
+        _copy_app(tmp_path)
         (tmp_path / ".env").write_text(
             "BBB_STT_PROMETHEUS_PORT=9464\n"
             f"PROMETHEUS_MULTIPROC_DIR={tmp_path}\n"
@@ -517,3 +522,74 @@ class TestDotenvIsLoadedFirst:
 
         assert result.returncode == 0, result.stderr
         assert result.stdout.split() == ["9464", "6390", "MmapedValue"]
+
+
+class TestProviderPluginIsPreloaded:
+    @pytest.mark.parametrize(
+        "provider, plugin",
+        [
+            ("gladia", "livekit.plugins.gladia"),
+            ("voxtral-realtime", "livekit.plugins.silero"),
+        ],
+    )
+    def test_the_plugin_is_registered_before_the_worker_starts(
+        self, tmp_path, provider, plugin
+    ):
+        _copy_app(tmp_path)
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("BBB_STT_PROMETHEUS_PORT", "PROMETHEUS_MULTIPROC_DIR")
+        }
+        env["STT_PROVIDER"] = provider
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import runpy\n"
+                "from livekit.agents import Plugin, cli\n"
+                "cli.run_app = lambda options: print("
+                "*(p.package for p in Plugin.registered_plugins))\n"
+                "runpy.run_path('main.py', run_name='__main__')",
+            ],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert plugin in result.stdout.split()
+
+    def test_the_plugin_is_registered_in_the_dev_reload_process(self, tmp_path):
+        """`main.py dev` runs the worker in a child process that imports
+        main.py as __mp_main__, so a call under `if __name__ == "__main__"`
+        never runs there."""
+        _copy_app(tmp_path)
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("BBB_STT_PROMETHEUS_PORT", "PROMETHEUS_MULTIPROC_DIR")
+        }
+        env["STT_PROVIDER"] = "gladia"
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import runpy\n"
+                "from livekit.agents import Plugin\n"
+                "runpy.run_path('main.py', run_name='__mp_main__')\n"
+                "print(*(p.package for p in Plugin.registered_plugins))",
+            ],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "livekit.plugins.gladia" in result.stdout.split()

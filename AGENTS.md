@@ -27,15 +27,15 @@ dependencies, run the agent, and run tests.
 - **`main.py`** — registers the LiveKit worker via `cli.run_app(WorkerOptions)`.
   `entrypoint()` wires up `RedisManager`, the STT agent (via `create_agent()`), and
   the final/interim transcript handlers, and routes Redis messages for locale and
-  speech-option changes and user removal. Its `prewarm_fnc` calls
-  `prewarm_provider()` so a provider with slow assets loads them once per worker
-  process rather than once per room.
+  speech-option changes and user removal. It calls `import_provider()` on import
+  and `prewarm_provider()` from its `prewarm_fnc` (see `providers/` below).
   Provider-agnostic: no references to any specific provider.
 - **`providers/`** — STT provider abstraction:
   - **`__init__.py`** — factory
     `create_agent(provider, userdata=None) -> BaseSttAgent`, accepting `"gladia"`,
-    `"openai"` and `"voxtral-realtime"`, plus `prewarm_provider(provider, userdata)`
-    for the worker's prewarm hook. `create_agent()` is the only validator of the
+    `"openai"` and `"voxtral-realtime"`. `prewarm_provider()` loads slow assets
+    once per job process; `import_provider()` registers the provider's LiveKit
+    plugin before job processes fork. `create_agent()` is the only validator of the
     provider name; `prewarm_provider()` ignores an unknown one so a bad name cannot
     kill the worker before it reports the real error.
   - **`base.py`** — `BaseSttAgent(EventEmitter, ABC)` + `BaseSttConfig`. All
@@ -152,9 +152,9 @@ fixed pause in its place races the teardown and strands `bbb_stt_active_agents`.
    already stored.
 3. **Handle a `None` locale** in `_create_stt_stream()` — it is how `"auto"`
    reaches a provider. Omitting the language is what enables server-side detection.
-4. Register it in the factory in `providers/__init__.py`; if it loads slow assets
-   (a local model), give it a `prewarm(userdata)` and dispatch to it from
-   `prewarm_provider()` too.
+4. Register it in the factory in `providers/__init__.py`, and in
+   `import_provider()` if it imports a LiveKit plugin. A provider with slow assets
+   (a local model) gets a `prewarm(userdata)`, dispatched from `prewarm_provider()`.
 5. `providers/gladia.py` is the reference implementation for stream-based providers;
    `providers/openai.py` for providers that need their own pipeline, and
    `providers/voxtral_realtime.py` for one that also does its own VAD and

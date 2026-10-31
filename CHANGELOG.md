@@ -5,6 +5,10 @@ Intermediate pre-release changes will only be registered *separately* in their
 respective tag's CHANGELOG.
 Final releases will consolidate all intermediate changes in chronological order.
 
+## UNRELEASED
+
+* fix: import the STT provider before the worker forks job processes
+
 ## v0.4.0
 
 * feat(openai): add OpenAI STT provider support (official and compatible endpoints)

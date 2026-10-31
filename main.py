@@ -11,7 +11,7 @@ from livekit.agents import JobContext, JobProcess, WorkerOptions, cli, stt
 from livekit import rtc
 
 from redis_manager import RedisManager
-from providers import create_agent, prewarm_provider
+from providers import create_agent, import_provider, prewarm_provider
 from metrics import (
     AGENT_FAILURE_REDIS_CONNECT,
     AGENT_FAILURE_UNKNOWN_PROVIDER,
@@ -33,6 +33,10 @@ from utils import (
     coerce_partial_utterances,
     resolve_bbb_locale,
 )
+
+# At module level rather than under __main__: `main.py dev` runs the worker in
+# a child process that imports this file as __mp_main__.
+import_provider(stt_provider)
 
 
 def _log_startup_configuration(stt_config):
