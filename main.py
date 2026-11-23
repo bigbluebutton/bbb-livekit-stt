@@ -22,15 +22,18 @@ from metrics import (
     stt_metrics,
 )
 from config import (
+    agent_transcripts_enabled,
     get_redacted_app_config,
     metrics_config,
     redis_config,
     stt_provider,
 )
+from transcript_stream import publish_transcript
 from utils import (
     coerce_min_utterance_length_seconds,
     coerce_partial_utterances,
     resolve_bbb_locale,
+    transcript_id,
 )
 
 # At module level rather than under __main__: `main.py dev` runs the worker in
@@ -174,6 +177,17 @@ async def entrypoint(ctx: JobContext):
                 end_time_adjusted,
                 result=True,
             )
+            if agent_transcripts_enabled:
+                await publish_transcript(
+                    agent.room,
+                    participant,
+                    text,
+                    bbb_locale,
+                    transcript_id(
+                        participant.identity, bbb_locale, start_time_adjusted
+                    ),
+                    final=True,
+                )
 
             # Recorded after the publish, so a metrics error cannot drop the
             # transcript.
@@ -290,6 +304,17 @@ async def entrypoint(ctx: JobContext):
                 end_time_adjusted,
                 result=False,
             )
+            if agent_transcripts_enabled:
+                await publish_transcript(
+                    agent.room,
+                    participant,
+                    text,
+                    bbb_locale,
+                    transcript_id(
+                        participant.identity, bbb_locale, start_time_adjusted
+                    ),
+                    final=False,
+                )
 
             # After the publish, as in on_final_transcript.
             if not published:

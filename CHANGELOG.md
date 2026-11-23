@@ -5,6 +5,10 @@ Intermediate pre-release changes will only be registered *separately* in their
 respective tag's CHANGELOG.
 Final releases will consolidate all intermediate changes in chronological order.
 
+## UNRELEASED
+
+* feat: stream transcripts to the agents in the LiveKit room (`AGENT_TRANSCRIPTS_ENABLED`)
+
 ## v0.5.0
 
 * fix: import the STT provider before the worker forks job processes

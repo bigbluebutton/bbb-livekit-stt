@@ -101,6 +101,8 @@ class MetricsConfig:
 metrics_config = MetricsConfig()
 
 stt_provider = os.getenv("STT_PROVIDER", "gladia").lower()
+# Also stream each transcript into the LiveKit room, to the agents in it.
+agent_transcripts_enabled = bool(_get_bool_env("AGENT_TRANSCRIPTS_ENABLED", False))
 
 
 def redact_config_values(value: object, key: str | None = None) -> object:
@@ -121,5 +123,6 @@ def get_redacted_app_config(stt_config) -> Dict[str, Any]:
         "redis": asdict(redis_config),
         "metrics": asdict(metrics_config),
         "stt": asdict(stt_config),
+        "agent_transcripts_enabled": agent_transcripts_enabled,
     }
     return redact_config_values(config_payload)
