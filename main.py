@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import sys
 
 from livekit.agents import JobContext, JobProcess, WorkerOptions, cli, stt
 from livekit import rtc
@@ -410,6 +411,9 @@ if __name__ == "__main__":
         WorkerOptions(
             entrypoint_fnc=entrypoint,
             prewarm_fnc=prewarm,
+            # livekit-agents gives up after 16 attempts and, before 1.6.5, leaves the
+            # process up and idle: an outage of a few minutes would end transcription.
+            max_retry=sys.maxsize,
             **metrics_kwargs,
         )
     )
