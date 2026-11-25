@@ -16,6 +16,7 @@ from metrics import (
 from prometheus_client import CollectorRegistry
 
 from providers.base import BaseSttAgent, BaseSttConfig
+from transcript_stream import REQUEST_ATTRIBUTE
 
 
 class StubSttAgent(BaseSttAgent):
@@ -1480,7 +1481,7 @@ class TestTranscriptEpoch:
         agent = self._scripted_agent(["alice", "bob"])
         published = []
 
-        async def record(participant, event, open_time, locale):
+        async def record(participant, event, open_time, locale, captions=True):
             published.append(
                 (participant.identity, open_time + event.alternatives[0].start_time)
             )
@@ -1529,7 +1530,7 @@ class TestTranscriptEpoch:
         agent = self._scripted_agent(["alice"])
         published = []
 
-        async def record(participant, event, open_time, locale):
+        async def record(participant, event, open_time, locale, captions=True):
             published.append(open_time + event.alternatives[0].start_time)
 
         agent.on("final_transcript", record)
@@ -1571,7 +1572,7 @@ class TestTranscriptEpoch:
         agent = self._scripted_agent(["alice", "bob"])
         published = []
 
-        async def record(participant, event, open_time, locale):
+        async def record(participant, event, open_time, locale, captions=True):
             published.append(
                 (participant.identity, open_time + event.alternatives[0].start_time)
             )
@@ -1787,3 +1788,156 @@ class TestAgentShutdown:
             )
             is None
         )
+
+
+AUTO_REQUEST = '{"v": 1, "who": "all", "locale": "auto"}'
+
+
+def _requesting_agent(identity="assistant", request=AUTO_REQUEST):
+    """An agent participant, with a microphone of its own (its voice)."""
+    participant = _with_audio_track(_stub_participant(identity))
+    participant.kind = rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
+    participant.attributes = {REQUEST_ATTRIBUTE: request} if request else {}
+    return participant
+
+
+def _room_agent(*participants, accept=True):
+    agent, _ = _make_instrumented_agent()
+    agent.accept_requests = accept
+    agent.room = MagicMock()
+    agent.room.remote_participants = {p.identity: p for p in participants}
+    return agent
+
+
+def _tasks(agent):
+    return [info["task"] for info in agent.processing_info.values()]
+
+
+class TestAgentRequests:
+    """An agent declares REQUEST_ATTRIBUTE to have everyone else transcribed for it,
+    apart from the captions each user turns on for themselves."""
+
+    async def test_a_request_transcribes_everyone_but_agents(self):
+        user = _with_audio_track(_stub_participant("user_1"))
+        assistant = _requesting_agent()
+        agent = _room_agent(user, assistant)
+
+        with patch("providers.base.rtc.AudioStream"):
+            agent._refresh_requests()
+
+        assert agent.requesters() == ["assistant"]
+        assert set(agent.processing_info) == {"user_1"}
+        session = agent.processing_info["user_1"]
+        assert (session["captions"], session["metrics_locale"]) == (False, "auto")
+        assert "user_1" not in agent.participant_settings
+        await _drain(*_tasks(agent))
+
+    async def test_without_the_admin_allowing_it_a_request_does_nothing(self):
+        agent = _room_agent(
+            _with_audio_track(_stub_participant("user_1")),
+            _requesting_agent(),
+            accept=False,
+        )
+
+        agent._refresh_requests()
+
+        assert agent.requesters() == []
+        assert agent.processing_info == {}
+
+    async def test_the_request_ending_stops_what_only_it_wanted(self):
+        assistant = _requesting_agent()
+        agent = _room_agent(_with_audio_track(_stub_participant("user_1")), assistant)
+        with patch("providers.base.rtc.AudioStream"):
+            agent._refresh_requests()
+            tasks = _tasks(agent)
+
+            assistant.attributes = {}
+            agent._on_attributes_changed({REQUEST_ATTRIBUTE: ""}, assistant)
+
+        assert agent.requesters() == []
+        assert agent.processing_info == {}
+        await _drain(*tasks)
+
+    async def test_the_agent_leaving_ends_its_request(self):
+        assistant = _requesting_agent()
+        agent = _room_agent(_with_audio_track(_stub_participant("user_1")), assistant)
+        with patch("providers.base.rtc.AudioStream"):
+            agent._refresh_requests()
+            tasks = _tasks(agent)
+
+            # LiveKit takes the participant out of the room before the event.
+            del agent.room.remote_participants["assistant"]
+            agent._on_participant_disconnected(assistant)
+
+        assert agent.processing_info == {}
+        await _drain(*tasks)
+
+    async def test_own_captions_take_over_a_request_session(self):
+        agent = _room_agent(
+            _with_audio_track(_stub_participant("user_1")), _requesting_agent()
+        )
+        with patch("providers.base.rtc.AudioStream"):
+            agent._refresh_requests()
+            tasks = _tasks(agent)
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            tasks += _tasks(agent)
+
+        session = agent.processing_info["user_1"]
+        assert (session["captions"], session["metrics_locale"]) == (True, "pt-BR")
+        # With the provider BBB named, as any captions session.
+        assert agent.participant_settings["user_1"]["provider"] == "gladia"
+        await _drain(*tasks)
+
+    async def test_turning_captions_off_falls_back_to_the_request(self):
+        agent = _room_agent(
+            _with_audio_track(_stub_participant("user_1")), _requesting_agent()
+        )
+        with patch("providers.base.rtc.AudioStream"):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            agent._refresh_requests()
+            tasks = _tasks(agent)
+            agent.handle_speech_locale_change("user_1", "", "")
+            tasks += _tasks(agent)
+
+        session = agent.processing_info["user_1"]
+        assert (session["captions"], session["metrics_locale"]) == (False, "auto")
+        await _drain(*tasks)
+
+    async def test_a_request_leaves_a_captions_session_as_it_is(self):
+        agent = _room_agent(
+            _with_audio_track(_stub_participant("user_1")), _requesting_agent()
+        )
+        with patch("providers.base.rtc.AudioStream"):
+            agent.handle_speech_locale_change("user_1", "pt-BR", "gladia")
+            before = agent.processing_info["user_1"]["task"]
+            agent._refresh_requests()
+
+        assert agent.processing_info["user_1"]["task"] is before
+        assert agent.processing_info["user_1"]["captions"] is True
+        await _drain(before)
+
+    async def test_a_request_waits_for_the_microphone(self):
+        user = _stub_participant("user_1")
+        user.track_publications = {}
+        agent = _room_agent(user, _requesting_agent())
+        agent._refresh_requests()
+        assert agent.processing_info == {}
+
+        publication = _audio_publication()
+        user.track_publications = {"t": publication}
+        with patch("providers.base.rtc.AudioStream"):
+            agent._on_track_subscribed(publication.track, publication, user)
+
+        assert agent.processing_info["user_1"]["captions"] is False
+        await _drain(*_tasks(agent))
+
+    async def test_an_agent_joining_with_a_request_is_read_at_once(self):
+        user = _with_audio_track(_stub_participant("user_1"))
+        agent = _room_agent(user)
+        assistant = _requesting_agent()
+        agent.room.remote_participants["assistant"] = assistant
+        with patch("providers.base.rtc.AudioStream"):
+            agent._on_agent_changed(assistant)
+
+        assert "user_1" in agent.processing_info
+        await _drain(*_tasks(agent))

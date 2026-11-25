@@ -65,6 +65,8 @@ async def entrypoint(ctx: JobContext):
         raise
 
     _log_startup_configuration(agent.config)
+    # Agents in the room may ask for transcripts only when the admin allows it.
+    agent.accept_requests = agent_transcripts_enabled
 
     async def on_redis_message(message_data: str):
         try:
@@ -119,9 +121,12 @@ async def entrypoint(ctx: JobContext):
         event: stt.SpeechEvent,
         open_time: float,
         locale: str,
+        captions: bool = True,
     ):
         # The locale comes with the transcript, as open_time does: the
         # participant may have switched locale since this audio was transcribed.
+        # `captions`: the session is for the participant's own captions, published
+        # to BBB; otherwise it exists only for the agents that asked.
         original_locale = locale
 
         # "auto" means the provider detects the language, so there is no
@@ -157,7 +162,7 @@ async def entrypoint(ctx: JobContext):
                 transcript_lang, original_locale, agent.translation_lang_map
             )
 
-            if not bbb_locale:
+            if captions and not bbb_locale:
                 logging.warning(
                     f"Discarding final transcript for {participant.identity}: "
                     f"the provider reported no language and the participant's "
@@ -169,25 +174,31 @@ async def entrypoint(ctx: JobContext):
                 )
                 continue
 
-            published = await redis_manager.publish_update_transcript_pub_msg(
-                agent.room.name,
-                participant.identity,
-                alternative,
-                bbb_locale,
-                start_time_adjusted,
-                end_time_adjusted,
-                result=True,
-            )
-            if agent_transcripts_enabled:
+            published = True
+            if captions:
+                published = await redis_manager.publish_update_transcript_pub_msg(
+                    agent.room.name,
+                    participant.identity,
+                    alternative,
+                    bbb_locale,
+                    start_time_adjusted,
+                    end_time_adjusted,
+                    result=True,
+                )
+            requesters = agent.requesters()
+            if requesters:
+                # Agents take a transcript whose language is unknown, as asked.
+                agent_locale = bbb_locale or original_locale
                 await publish_transcript(
                     agent.room,
                     participant,
                     text,
-                    bbb_locale,
+                    agent_locale,
                     transcript_id(
-                        participant.identity, bbb_locale, start_time_adjusted
+                        participant.identity, agent_locale, start_time_adjusted
                     ),
                     final=True,
+                    destinations=requesters,
                 )
 
             # Recorded after the publish, so a metrics error cannot drop the
@@ -305,17 +316,6 @@ async def entrypoint(ctx: JobContext):
                 end_time_adjusted,
                 result=False,
             )
-            if agent_transcripts_enabled:
-                await publish_transcript(
-                    agent.room,
-                    participant,
-                    text,
-                    bbb_locale,
-                    transcript_id(
-                        participant.identity, bbb_locale, start_time_adjusted
-                    ),
-                    final=False,
-                )
 
             # After the publish, as in on_final_transcript.
             if not published:

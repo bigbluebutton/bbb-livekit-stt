@@ -14,6 +14,7 @@ from livekit.agents import (
 )
 
 from events import EventEmitter
+from transcript_stream import requested_locale
 from metrics import (
     AGENT_FAILURE_ROOM_CONNECT,
     SESSION_END_AUDIO_ENDED,
@@ -53,6 +54,10 @@ class BaseSttAgent(EventEmitter, ABC):
         self.room: rtc.Room | None = None
         self.processing_info = {}
         self.participant_settings = {}
+        # Whether agents in the room may ask for transcripts (AGENT_TRANSCRIPTS_ENABLED),
+        # and what they ask: agent identity -> locale.
+        self.accept_requests = False
+        self.requests: dict[str, str] = {}
         self._shutdown = asyncio.Event()
         # Set once start() has finished, or failed; shutdown() waits on it.
         self._stopped = asyncio.Event()
@@ -147,6 +152,11 @@ class BaseSttAgent(EventEmitter, ABC):
         self.room.on("disconnected", self._on_disconnected)
         self.room.on("track_subscribed", self._on_track_subscribed)
         self.room.on("track_unsubscribed", self._on_track_unsubscribed)
+        if self.accept_requests:
+            self.room.on("participant_connected", self._on_agent_changed)
+            self.room.on("participant_attributes_changed", self._on_attributes_changed)
+            # An agent that was already here when this one joined.
+            self._refresh_requests()
 
         self.metrics.agent_started(self.provider_name)
 
@@ -180,7 +190,11 @@ class BaseSttAgent(EventEmitter, ABC):
         settings = self.participant_settings.setdefault(user_id, {})
         settings["locale"] = locale
         settings["provider"] = provider
+        self._open_session(user_id, locale, captions=True)
 
+    def _open_session(self, user_id: str, locale: str, captions: bool):
+        """Transcribe a participant's microphone in `locale`. `captions`: for their own
+        captions, published to BBB; otherwise only for the agents that asked."""
         participant = self._find_participant(user_id)
 
         if not participant:
@@ -221,12 +235,15 @@ class BaseSttAgent(EventEmitter, ABC):
             raise
 
         task = self._spawn_pipeline(
-            self._run_transcription_pipeline(participant, track, stt_stream, locale)
+            self._run_transcription_pipeline(
+                participant, track, stt_stream, locale, captions
+            )
         )
         self.processing_info[participant.identity] = {
             "stream": stt_stream,
             "task": task,
             "track_sid": track.sid,
+            "captions": captions,
             # The locale the gauge was incremented under. Kept apart from
             # participant_settings: a later change there must not move the
             # decrement to another label and leave this one stuck above zero.
@@ -251,6 +268,12 @@ class BaseSttAgent(EventEmitter, ABC):
         if not (locale and provider):
             self.disable_transcription_for_user(user_id)
             return
+
+        info = self.processing_info.get(user_id)
+        if info is not None and not info.get("captions", True):
+            # A session for the agents' request: the user's own captions take it
+            # over, in their locale and published to BBB.
+            self.stop_transcription_for_user(user_id)
 
         if user_id not in self.processing_info:
             # Nothing to adjust: transcription is off, or its audio track went
@@ -277,6 +300,9 @@ class BaseSttAgent(EventEmitter, ABC):
         if settings is not None:
             settings.pop("locale", None)
             settings.pop("provider", None)
+
+        # An agent may still want them transcribed.
+        self._reconcile_request(user_id)
 
     def stop_transcription_for_user(self, user_id: str):
         logging.debug(f"Stopping transcription for {user_id}.")
@@ -381,8 +407,9 @@ class BaseSttAgent(EventEmitter, ABC):
             self.start_transcription_for_user(participant.identity, locale, provider)
         else:
             logging.debug(
-                f"Participant {participant.identity} subscribed with no active settings, skipping transcription."
+                f"Participant {participant.identity} subscribed with no active settings."
             )
+            self._reconcile_request(participant.identity)
 
     def _on_track_unsubscribed(
         self,
@@ -407,9 +434,81 @@ class BaseSttAgent(EventEmitter, ABC):
         self.stop_transcription_for_user(participant.identity)
         # Settings stay until BBB removes the user: BBB announces a speech locale only
         # when it is set, not when the user reconnects.
+        if self.accept_requests:
+            self._on_agent_changed(participant)
 
     def _on_disconnected(self):
         self._shutdown.set()
+
+    # Agents' requests: an agent declares REQUEST_ATTRIBUTE while it wants the room
+    # transcribed for it. Declared state, not commands: a request ends when its agent
+    # leaves, and one already in the room is read again after a reconnect.
+
+    def requesters(self) -> list[str]:
+        """The agents that asked for the room's transcripts."""
+        return list(self.requests)
+
+    def _on_attributes_changed(self, _changed: dict, participant: rtc.Participant):
+        self._on_agent_changed(participant)
+
+    def _on_agent_changed(self, participant: rtc.Participant):
+        if (
+            getattr(participant, "kind", None)
+            == rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
+        ):
+            self._refresh_requests()
+
+    def _refresh_requests(self):
+        if self.room is None or not self.accept_requests:
+            return
+        requests = {}
+        for participant in self.room.remote_participants.values():
+            locale = requested_locale(participant)
+            if locale:
+                requests[participant.identity] = locale
+        if requests == self.requests:
+            return
+        logging.info(f"Transcription requests from agents: {requests}")
+        self.requests = requests
+        for identity in list(self.room.remote_participants):
+            self._reconcile_request(identity)
+
+    def _request_locale(self, user_id: str) -> str | None:
+        """The locale the agents ask this participant to be transcribed in, if any.
+        Agents are never transcribed for a request: they would hear themselves."""
+        if not self.requests:
+            return None
+        participant = self._find_participant(user_id)
+        if (
+            participant is None
+            or participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
+        ):
+            return None
+        # One locale for all: with several agents, the first one's.
+        return next(iter(self.requests.values()))
+
+    def _reconcile_request(self, user_id: str):
+        """Open or close the session the agents' request asks for. The user's own
+        captions, when on, govern their session instead."""
+        if self._shutdown.is_set() or self.room is None:
+            return
+        settings = self.participant_settings.get(user_id, {})
+        if settings.get("locale") and settings.get("provider"):
+            return
+
+        info = self.processing_info.get(user_id)
+        locale = self._request_locale(user_id)
+        if info is not None and (locale is None or info["metrics_locale"] != locale):
+            self.stop_transcription_for_user(user_id)
+            info = None
+        if info is not None or locale is None:
+            return
+
+        participant = self._find_participant(user_id)
+        if participant is None or self._find_audio_track(participant) is None:
+            # No microphone yet: _on_track_subscribed comes back here.
+            return
+        self._open_session(user_id, locale, captions=False)
 
     def _find_participant(self, identity: str) -> rtc.RemoteParticipant | None:
         for p in self.room.remote_participants.values():
@@ -463,6 +562,7 @@ class BaseSttAgent(EventEmitter, ABC):
         track: rtc.Track,
         stt_stream: stt.SpeechStream,
         locale: str,
+        captions: bool = True,
     ):
         audio_stream = None
         # From here on this pipeline closes its own streams; see
@@ -518,6 +618,7 @@ class BaseSttAgent(EventEmitter, ABC):
                         event=event,
                         open_time=open_time,
                         locale=locale,
+                        captions=captions,
                     )
                 elif is_interim:
                     self.emit(

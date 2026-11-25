@@ -1,11 +1,13 @@
-"""Transcripts published into the LiveKit room, for agents in the same meeting.
+"""Transcripts published into the LiveKit room, for the agents that ask for them.
 
-Each utterance goes out as a text stream on LiveKit's standard transcription topic,
-sent on behalf of the speaker, so another agent can follow the meeting without
-reading BBB's Redis. Only agent participants receive it: end users' clients never
-get the transcript through this path.
+An agent asks by declaring an attribute on its own participant (REQUEST_ATTRIBUTE):
+while it is in the room, everyone else is transcribed for it. Each utterance goes out
+as a text stream on LiveKit's standard transcription topic, sent on behalf of the
+speaker, to the agents that asked. Only an agent participant can ask: BBB's clients
+join as standard participants, so an end user never gets the transcript this way.
 """
 
+import json
 import logging
 
 from livekit import rtc
@@ -16,14 +18,37 @@ ATTRIBUTE_TRACK_ID = "lk.transcribed_track_id"
 ATTRIBUTE_SEGMENT_ID = "lk.segment_id"
 ATTRIBUTE_FINAL = "lk.transcription_final"
 ATTRIBUTE_LOCALE = "bbb.locale"
+# What an agent declares to have the room transcribed for it, as JSON:
+# {"v": 1, "who": "all", "locale": "auto"}. The locale is "auto" when left out.
+REQUEST_ATTRIBUTE = "bbb.transcription"
+REQUEST_VERSION = 1
 
 
-def _agent_identities(room: rtc.Room) -> list[str]:
-    return [
-        p.identity
-        for p in room.remote_participants.values()
-        if p.kind == rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
-    ]
+def requested_locale(participant: rtc.RemoteParticipant) -> str | None:
+    """The locale an agent asks the room to be transcribed in, or None if it asks
+    nothing. A standard participant's attribute is never a request."""
+    if participant.kind != rtc.ParticipantKind.PARTICIPANT_KIND_AGENT:
+        return None
+    raw = participant.attributes.get(REQUEST_ATTRIBUTE)
+    if not raw:
+        return None
+    try:
+        request = json.loads(raw)
+    except ValueError:
+        request = None
+    locale = request.get("locale", "auto") if isinstance(request, dict) else None
+    if (
+        not isinstance(request, dict)
+        or request.get("v") != REQUEST_VERSION
+        or request.get("who") != "all"
+        or not isinstance(locale, str)
+        or not locale
+    ):
+        logging.warning(
+            f"Ignoring the transcription request of {participant.identity}: {raw!r}"
+        )
+        return None
+    return locale
 
 
 def _microphone_track_sid(participant: rtc.RemoteParticipant) -> str | None:
@@ -40,9 +65,9 @@ async def publish_transcript(
     locale: str,
     segment_id: str,
     final: bool,
+    destinations: list[str],
 ) -> bool:
-    """Send one utterance to the agents in the room; return whether it was sent."""
-    destinations = _agent_identities(room)
+    """Send one utterance to the agents that asked; return whether it was sent."""
     if not destinations or not text.strip():
         return False
 

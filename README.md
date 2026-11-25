@@ -205,12 +205,36 @@ Caveats worth knowing:
 
 ### Transcripts for other agents
 
-Set `AGENT_TRANSCRIPTS_ENABLED=true` to also stream each transcript into the LiveKit
-room, so another LiveKit agent in the meeting (an assistant, for instance) can follow
-it without reading BBB's Redis. Each utterance is a text stream on LiveKit's
-`lk.transcription` topic, sent on behalf of the speaker, with the
-`lk.transcribed_track_id`, `lk.segment_id` and `lk.transcription_final` attributes
-plus `bbb.locale`. Only agent participants receive it; end users' clients never do.
+Set `AGENT_TRANSCRIPTS_ENABLED=true` to let another LiveKit agent in the meeting (an
+assistant, for instance) ask for the meeting's transcripts and follow it without
+reading BBB's Redis.
+
+An agent asks by declaring an attribute on its own participant, as JSON:
+
+```
+bbb.transcription = {"v": 1, "who": "all", "locale": "auto"}
+```
+
+While it is in the room, everyone else is transcribed for it, in `locale` (`auto`
+when left out: the provider detects the language). The request ends when the agent
+removes the attribute or leaves, and a request already in the room is read again
+when this agent reconnects. Only agent participants can ask, and other agents are
+never transcribed for a request. BBB's clients join LiveKit as standard participants
+and cannot set their own attributes.
+
+A request is independent from the captions each user turns on in their client:
+
+| The user's own captions | An agent's request | Transcribed in | Sent to |
+|---|---|---|---|
+| on | — | the user's locale | BBB, as today |
+| off | yes | the request's locale | only the agents that asked |
+| on | yes | the user's locale | BBB and the agents that asked |
+
+Each final utterance is a text stream on LiveKit's `lk.transcription` topic, sent on
+behalf of the speaker to the agents that asked, with the `lk.transcribed_track_id`,
+`lk.segment_id` and `lk.transcription_final` attributes plus `bbb.locale` (`auto`
+when the provider reported no language). Interim results stay with BBB's captions.
+End users' clients never receive it.
 
 ### OpenAI STT provider
 
