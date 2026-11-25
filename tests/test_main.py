@@ -35,6 +35,10 @@ class StubAgent(EventEmitter):
         self.release = asyncio.Event()
         self.stopped = asyncio.Event()
         self.locale_changes = []
+        self.requests = {}
+
+    def requesters(self):
+        return list(self.requests)
 
     def handle_speech_locale_change(self, user_id, locale, provider):
         self.locale_changes.append((user_id, locale, provider))
@@ -589,3 +593,58 @@ class TestProviderPluginIsPreloaded:
 
         assert result.returncode == 0, result.stderr
         assert "livekit.plugins.gladia" in result.stdout.split()
+
+
+class TestTranscriptsForAgents:
+    """A transcript reaches the agents that asked for the room's transcripts; BBB
+    gets it only from a session for the participant's own captions."""
+
+    @staticmethod
+    async def _emit(agent, captions, language="pt", locale="auto"):
+        agent.emit(
+            "final_transcript",
+            participant=_participant(),
+            event=_final_transcript(1.0, 2.0, language=language),
+            open_time=1_000_000.0,
+            locale=locale,
+            captions=captions,
+        )
+        for _ in range(4):
+            await asyncio.sleep(0)
+
+    async def test_a_session_only_for_agents_skips_bbb(self, entrypoint):
+        agent, publish, _route = entrypoint
+        agent.requests = {"assistant": "auto"}
+        with patch("main.publish_transcript", AsyncMock(return_value=True)) as sent:
+            await self._emit(agent, captions=False)
+
+        publish.assert_not_awaited()
+        sent.assert_awaited_once()
+        assert sent.await_args.kwargs["destinations"] == ["assistant"]
+        assert sent.await_args.args[3] == "pt-BR"
+
+    async def test_an_unknown_language_still_reaches_the_agents(self, entrypoint):
+        agent, publish, _route = entrypoint
+        agent.requests = {"assistant": "auto"}
+        with patch("main.publish_transcript", AsyncMock(return_value=True)) as sent:
+            await self._emit(agent, captions=False, language=None)
+
+        publish.assert_not_awaited()
+        assert sent.await_args.args[3] == "auto"
+
+    async def test_captions_go_to_bbb_and_to_the_agents_that_asked(self, entrypoint):
+        agent, publish, _route = entrypoint
+        agent.requests = {"assistant": "auto"}
+        with patch("main.publish_transcript", AsyncMock(return_value=True)) as sent:
+            await self._emit(agent, captions=True, locale="pt-BR")
+
+        publish.assert_awaited_once()
+        assert sent.await_args.kwargs["destinations"] == ["assistant"]
+
+    async def test_no_agent_asked_means_bbb_only(self, entrypoint):
+        agent, publish, _route = entrypoint
+        with patch("main.publish_transcript", AsyncMock(return_value=True)) as sent:
+            await self._emit(agent, captions=True, locale="pt-BR")
+
+        publish.assert_awaited_once()
+        sent.assert_not_awaited()

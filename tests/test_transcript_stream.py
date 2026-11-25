@@ -7,17 +7,25 @@ from transcript_stream import (
     ATTRIBUTE_LOCALE,
     ATTRIBUTE_SEGMENT_ID,
     ATTRIBUTE_TRACK_ID,
+    REQUEST_ATTRIBUTE,
     TOPIC_TRANSCRIPTION,
     publish_transcript,
+    requested_locale,
 )
+
+AGENT = rtc.ParticipantKind.PARTICIPANT_KIND_AGENT
 
 
 def _participant(
-    identity, kind=rtc.ParticipantKind.PARTICIPANT_KIND_STANDARD, mic=None
+    identity,
+    kind=rtc.ParticipantKind.PARTICIPANT_KIND_STANDARD,
+    mic=None,
+    attributes=None,
 ):
     participant = MagicMock()
     participant.identity = identity
     participant.kind = kind
+    participant.attributes = attributes or {}
     publications = {}
     if mic:
         publication = MagicMock()
@@ -47,7 +55,13 @@ class TestPublishTranscript:
         room, writer = _room(speaker, assistant)
 
         sent = await publish_transcript(
-            room, speaker, "Olá, turma", "pt-BR", "w_alice-pt-BR-100", final=True
+            room,
+            speaker,
+            "Olá, turma",
+            "pt-BR",
+            "w_alice-pt-BR-100",
+            final=True,
+            destinations=["assistant"],
         )
 
         assert sent is True
@@ -72,17 +86,25 @@ class TestPublishTranscript:
         )
         room, _ = _room(speaker, assistant)
 
-        await publish_transcript(room, speaker, "Olá", "pt-BR", "seg", final=False)
+        await publish_transcript(
+            room,
+            speaker,
+            "Olá",
+            "pt-BR",
+            "seg",
+            final=False,
+            destinations=["assistant"],
+        )
 
         attributes = room.local_participant.stream_text.await_args.kwargs["attributes"]
         assert attributes[ATTRIBUTE_FINAL] == "false"
 
-    async def test_end_users_never_receive_it(self):
+    async def test_nothing_is_sent_without_an_agent_that_asked(self):
         speaker = _participant("w_alice", mic="TR_mic")
         room, _ = _room(speaker, _participant("w_bob"))
 
         sent = await publish_transcript(
-            room, speaker, "Olá", "pt-BR", "seg", final=True
+            room, speaker, "Olá", "pt-BR", "seg", final=True, destinations=[]
         )
 
         assert sent is False
@@ -95,7 +117,9 @@ class TestPublishTranscript:
         )
         room, _ = _room(speaker, assistant)
 
-        await publish_transcript(room, speaker, "Olá", "pt-BR", "seg", final=True)
+        await publish_transcript(
+            room, speaker, "Olá", "pt-BR", "seg", final=True, destinations=["assistant"]
+        )
 
         attributes = room.local_participant.stream_text.await_args.kwargs["attributes"]
         assert ATTRIBUTE_TRACK_ID not in attributes
@@ -107,7 +131,9 @@ class TestPublishTranscript:
         )
         room, _ = _room(speaker, assistant)
 
-        sent = await publish_transcript(room, speaker, "  ", "pt-BR", "seg", final=True)
+        sent = await publish_transcript(
+            room, speaker, "  ", "pt-BR", "seg", final=True, destinations=["assistant"]
+        )
 
         assert sent is False
         room.local_participant.stream_text.assert_not_awaited()
@@ -121,7 +147,47 @@ class TestPublishTranscript:
         room.local_participant.stream_text.side_effect = RuntimeError("room closed")
 
         sent = await publish_transcript(
-            room, speaker, "Olá", "pt-BR", "seg", final=True
+            room, speaker, "Olá", "pt-BR", "seg", final=True, destinations=["assistant"]
         )
 
         assert sent is False
+
+
+class TestRequestedLocale:
+    def test_an_agent_asks_for_everyone_in_a_locale(self):
+        agent = _participant(
+            "assistant",
+            kind=AGENT,
+            attributes={REQUEST_ATTRIBUTE: '{"v": 1, "who": "all", "locale": "pt-BR"}'},
+        )
+        assert requested_locale(agent) == "pt-BR"
+
+    def test_the_locale_is_auto_when_left_out(self):
+        agent = _participant(
+            "assistant",
+            kind=AGENT,
+            attributes={REQUEST_ATTRIBUTE: '{"v": 1, "who": "all"}'},
+        )
+        assert requested_locale(agent) == "auto"
+
+    def test_a_standard_participant_never_asks(self):
+        user = _participant(
+            "w_alice", attributes={REQUEST_ATTRIBUTE: '{"v": 1, "who": "all"}'}
+        )
+        assert requested_locale(user) is None
+
+    def test_an_agent_without_the_attribute_asks_nothing(self):
+        assert requested_locale(_participant("assistant", kind=AGENT)) is None
+
+    def test_a_request_it_cannot_read_is_ignored(self):
+        for raw in (
+            "not json",
+            "[]",
+            '{"v": 2, "who": "all"}',
+            '{"v": 1, "who": ["w_alice"]}',
+            '{"v": 1, "who": "all", "locale": 7}',
+        ):
+            agent = _participant(
+                "assistant", kind=AGENT, attributes={REQUEST_ATTRIBUTE: raw}
+            )
+            assert requested_locale(agent) is None, raw

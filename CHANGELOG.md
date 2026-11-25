@@ -7,7 +7,8 @@ Final releases will consolidate all intermediate changes in chronological order.
 
 ## UNRELEASED
 
-* feat: stream transcripts to the agents in the LiveKit room (`AGENT_TRANSCRIPTS_ENABLED`)
+* feat: transcribe the meeting for the agents that ask for it, and stream them the transcripts (`AGENT_TRANSCRIPTS_ENABLED`)
+* fix: keep reconnecting to LiveKit instead of giving up after 16 attempts
 
 ## v0.5.0
 
